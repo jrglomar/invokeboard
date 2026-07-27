@@ -67,13 +67,35 @@ Everything you need to prepare the next sprint.
 - **Offset wallet** — earned offset banks automatically per sprint; spending auto‑deducts from Offset
   leaves. See each developer's balance and a full **history** of earns and spends.
 
-### 🔗 Linking — turn PO stories into Dev tasks
+### 🔗 Linking — connect PO stories and Dev tasks, in both directions
+
+Three modes, switched at the top of the page. Both sprint pickers stay on screen; what they *mean*
+changes per mode (source vs target).
+
+**Create Dev tasks** (the original flow)
 
 - Select PO stories and **bulk‑create linked Dev tasks**, with an AI plan drafted from each story's
   description.
 - **Point‑driven breakdown** — a story's points auto‑split into one or two Dev tasks on the allowed
   scale (e.g. 4 → 2 + 2), each with its own points and assignee.
-- Links are created so the **PO story "depends on" its Dev task(s)**.
+
+**Link existing** (v1.72) — for Dev tickets that already exist
+
+- Pick a target PO story, then tick any number of **existing** Dev tickets from a Dev sprint and
+  link them in one go. **Many Dev tickets can hang off one PO story.**
+- Filter the candidate list by assignee, or show only tickets that have **no PO link** yet.
+- Already‑linked pairs are detected and skipped rather than duplicated.
+- **Unlink** — each link badge has an unlink control (click once to arm, again to confirm) for
+  fixing a wrong link without leaving InvokeBoard.
+
+**New PO from Dev tasks** (v1.72) — the inverse, for when the work landed first
+
+- Select existing Dev tickets and have the AI draft **one PO story that covers all of them**, with
+  acceptance criteria derived from the tasks themselves. Edit it, then create and link in one step.
+- The new story's points are pre‑filled with the **sum** of the selected Dev tickets' points.
+- When AI is off, the draft falls back to a deterministic template — the flow never blocks.
+
+Links are always created so the **PO story "depends on" its Dev task(s)**.
 
 ### 📊 Reports — sprint review & metrics
 
@@ -114,11 +136,11 @@ change is shown for **confirmation before it's applied**. Nothing is changed wit
 
 ### 🧰 Using the MCP tools
 
-Every tab above is a thin UI over **48 MCP tools**, split across two servers: `mcp-jira` (43
-tools — tickets, sprints, reports, leaves, the offset wallet, the Huddle stores) and `mcp-github`
-(5 tools — pull requests). There are two ways to reach them:
+Every tab above is a thin UI over **52 MCP tools**, split across two servers: `mcp-jira` (47
+tools — tickets, sprints, reports, leaves, the offset wallet, the Huddle stores, PO ↔ Dev links)
+and `mcp-github` (5 tools — pull requests). There are two ways to reach them:
 
-- **VS Code Copilot Chat** gets **all 48**. This repo's `.vscode/mcp.json` registers both servers,
+- **VS Code Copilot Chat** gets **all 52**. This repo's `.vscode/mcp.json` registers both servers,
   and VS Code loads them automatically the moment you open the workspace folder — see **Step 3**
   of [`docs/SETUP.md`](SETUP.md). Copilot talks to them over **stdio**; the dashboard instead
   talks to an HTTP bridge in front of the same tool registry (see `docs/ARCHITECTURE.md`, §7, for
@@ -153,7 +175,7 @@ A few prompts that work well in Copilot Chat:
 
 ### 📋 Tool reference
 
-All 48 tools, grouped the same way the in‑app Guide groups them. **Type** marks which system a
+All 52 tools, grouped the same way the in‑app Guide groups them. **Type** marks which system a
 tool acts on and whether it reads or writes; **AI** marks whether the floating assistant can call
 it itself (`Ask`), only propose it for your confirmation (`Propose`), or not reach it at all
 (`—` — dashboard-only or Copilot‑only).
@@ -194,7 +216,7 @@ it itself (`Ask`), only propose it for your confirmation (`Propose`), or not rea
 | `get_velocity` | Average completed points over recent sprints, with a simple forecast. | Jira·Read | Ask | Reports |
 | `get_multi_sprint_report` | One report across a window of sprints (default last 10 closed): per‑sprint points and counts plus team and per‑developer aggregates. | Jira·Read | Ask | Reports · Trends & KPIs |
 
-#### Assignment & roster (5)
+#### Assignment & roster (7)
 
 | Tool | What it does | Type | AI | Used in the app |
 |---|---|---|---|---|
@@ -203,6 +225,8 @@ it itself (`Ask`), only propose it for your confirmation (`Propose`), or not rea
 | `get_recent_assignees` | Suggest roster members from everyone assigned a ticket recently on the board. | Jira·Read | — | Planning · Team roster |
 | `get_team_members` | The curated team roster InvokeBoard plans around, per board. | Local·Read | Ask | Planning · Team roster |
 | `set_team_members` | Replace the curated team roster for a board. | Local·Write | — | Planning · Team roster |
+| `get_draft_plan` | The DRAFT split of a PO sprint's tickets across developers (never a Jira write). | Local·Read | Ask | Planning · Draft Capacity Plan |
+| `set_draft_plan` | Replace a PO sprint's whole draft capacity plan (draft only — never writes to Jira). | Local·Write | — | Planning · Draft Capacity Plan |
 
 #### Leaves & offset wallet (8)
 
@@ -234,10 +258,12 @@ it itself (`Ask`), only propose it for your confirmation (`Propose`), or not rea
 | `get_retro` | The sprint's saved retrospective (delays, what worked, kudos and more). | Local·Read | Ask | Reports · Retrospective |
 | `set_retro` | Replace the sprint's retrospective fields. | Local·Write | — | Reports · Retrospective |
 
-#### Linking & PR visibility (2)
+#### Linking & PR visibility (4)
 
 | Tool | What it does | Type | AI | Used in the app |
 |---|---|---|---|---|
+| `link_dev_to_po` | Link an existing Dev ticket to an existing PO story (PO depends on Dev). | Jira·Write | — | Linking · Link existing |
+| `unlink_dev_from_po` | Remove a PO ↔ Dev issue link by its link id. | Jira·Write | — | Linking · Link existing |
 | `get_linked_issues` | Issues linked to a set of keys, filtered to a project (PO ↔ Dev links). | Jira·Read | Ask | Linking, fly‑in tracker |
 | `get_issue_pull_requests` | Every linked PR (any repo) for a set of issues, with approval status. | Jira·Read | Ask | Huddle has‑PR badges, Reports |
 
@@ -251,8 +277,8 @@ it itself (`Ask`), only propose it for your confirmation (`Propose`), or not rea
 | `link_pr_to_ticket` | Link a PR to Jira ticket(s) — a remote link plus a PR comment (idempotent). | GitHub·Write | — | Huddle chat · `link pr <n> [KEY]` |
 | `sync_pr_links` | Auto‑link every open PR in a repo to its detected Jira ticket(s). | GitHub·Write | — | VS Code Copilot only |
 
-**43** tools live on `mcp-jira`, **5** on `mcp-github` — **48** in total. The floating assistant
-can read 19 of them and propose 7 more with your confirmation; the rest are driven directly by
+**47** tools live on `mcp-jira`, **5** on `mcp-github` — **52** in total. The floating assistant
+can read 20 of them and propose 7 more with your confirmation; the rest are driven directly by
 the dashboard's UI (or, for three GitHub tools, reachable only via Copilot).
 
 ---

@@ -212,7 +212,7 @@ export const TOOL_CATALOG: ToolCatalogEntry[] = [
     aiAssistant: "read",
   },
 
-  // ── Assignment & roster (5) ─────────────────────────────────────────────────
+  // ── Assignment & roster (7) ─────────────────────────────────────────────────
   {
     name: "get_assignable_users",
     server: "mcp-jira",
@@ -261,6 +261,26 @@ export const TOOL_CATALOG: ToolCatalogEntry[] = [
     access: "write",
     blurb: "Replace the curated team roster for a board.",
     appSurface: "Planning · Team roster",
+    aiAssistant: "none",
+  },
+  {
+    name: "get_draft_plan",
+    server: "mcp-jira",
+    group: "Assignment & roster",
+    surface: "local",
+    access: "read",
+    blurb: "The DRAFT split of a PO sprint's tickets across developers (never a Jira write).",
+    appSurface: "Planning · Draft Capacity Plan",
+    aiAssistant: "read",
+  },
+  {
+    name: "set_draft_plan",
+    server: "mcp-jira",
+    group: "Assignment & roster",
+    surface: "local",
+    access: "write",
+    blurb: "Replace a PO sprint's whole draft capacity plan (draft only — never writes to Jira).",
+    appSurface: "Planning · Draft Capacity Plan",
     aiAssistant: "none",
   },
 
@@ -468,7 +488,27 @@ export const TOOL_CATALOG: ToolCatalogEntry[] = [
     aiAssistant: "none",
   },
 
-  // ── Linking & PR visibility (2) ─────────────────────────────────────────────
+  // ── Linking & PR visibility (4) ─────────────────────────────────────────────
+  {
+    name: "link_dev_to_po",
+    server: "mcp-jira",
+    group: "Linking & PR visibility",
+    surface: "jira",
+    access: "write",
+    blurb: "Link an existing Dev ticket to an existing PO story (PO depends on Dev).",
+    appSurface: "Linking · Link existing",
+    aiAssistant: "none",
+  },
+  {
+    name: "unlink_dev_from_po",
+    server: "mcp-jira",
+    group: "Linking & PR visibility",
+    surface: "jira",
+    access: "write",
+    blurb: "Remove a PO ↔ Dev issue link by its link id.",
+    appSurface: "Linking · Link existing",
+    aiAssistant: "none",
+  },
   {
     name: "get_linked_issues",
     server: "mcp-jira",

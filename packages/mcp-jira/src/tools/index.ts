@@ -44,6 +44,8 @@ import { addOffsetAdjustmentTool } from "./addOffsetAdjustment.js";
 import { deleteOffsetAdjustmentTool } from "./deleteOffsetAdjustment.js";
 import { getDraftPlanTool } from "./getDraftPlan.js";
 import { setDraftPlanTool } from "./setDraftPlan.js";
+import { linkDevToPo } from "./linkDevToPo.js";
+import { unlinkDevFromPo } from "./unlinkDevFromPo.js";
 
 export const tools: ToolDef[] = [
   createPoTicket,
@@ -91,4 +93,6 @@ export const tools: ToolDef[] = [
   deleteOffsetAdjustmentTool,
   getDraftPlanTool,
   setDraftPlanTool,
+  linkDevToPo,
+  unlinkDevFromPo,
 ];

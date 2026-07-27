@@ -151,12 +151,15 @@ const SECTIONS: Section[] = [
   },
   {
     id: "linking",
-    title: "Linking — turn PO stories into Dev tasks",
+    title: "Linking — connect PO stories and Dev tasks, both directions",
     icon: Link2,
     body: (
       <ul className="list-disc pl-5 space-y-1.5">
-        <li>Select PO stories and <T>bulk-create linked Dev tasks</T>, with an AI plan drafted from each story's description.</li>
-        <li><T>Point-driven breakdown</T> — a story's points auto-split into one or two Dev tasks (e.g. 4 → 2 + 2), each with its own points and assignee.</li>
+        <li>Three modes, switched at the top of the page. Both sprint pickers stay on screen — what they <T>mean</T> changes per mode (source vs. target).</li>
+        <li><T>Create Dev tasks</T> — select PO stories and bulk-create linked Dev tasks, with an AI plan drafted from each story's description. <T>Point-driven breakdown</T> auto-splits a story's points into one or two Dev tasks (e.g. 4 → 2 + 2), each with its own points and assignee.</li>
+        <li><T>Link existing</T> — pick a target PO story, then tick any number of <T>existing</T> Dev tickets and link them at once (many Dev tickets can hang off one PO story). Filter by assignee or show only tickets with no PO link; already-linked pairs are skipped, not duplicated.</li>
+        <li><T>Unlink</T> — every link badge has an unlink control (click to arm, click again to confirm) for fixing a wrong link without leaving InvokeBoard.</li>
+        <li><T>New PO from Dev tasks</T> — the inverse: select existing Dev tickets and let the AI draft <T>one PO story covering all of them</T>, points pre-filled with their sum. Edit, then create and link in one step. With AI off it falls back to a deterministic template.</li>
         <li>Links are created so the <T>PO story “depends on” its Dev task(s)</T>.</li>
       </ul>
     ),
@@ -234,14 +237,14 @@ const SECTIONS: Section[] = [
     body: (
       <>
         <p>
-          Everything in InvokeBoard runs on <T>48 MCP tools</T> spread across two servers —{" "}
+          Everything in InvokeBoard runs on <T>52 MCP tools</T> spread across two servers —{" "}
           <T>mcp-jira</T> and <T>mcp-github</T>. There are two ways to reach them.
         </p>
 
         <p className="mt-3">
           <T>1. VS Code Copilot Chat.</T> Open the repo in VS Code and Copilot auto-loads both
           servers from <code className="font-mono text-xs">.vscode/mcp.json</code> — nothing to
-          configure. All 48 tools are available there, including a few with no dashboard button at
+          configure. All 52 tools are available there, including a few with no dashboard button at
           all, like <code className="font-mono text-xs">sync_pr_links</code>,{" "}
           <code className="font-mono text-xs">get_pr</code> and{" "}
           <code className="font-mono text-xs">get_pr_reviews</code>. Try asking:

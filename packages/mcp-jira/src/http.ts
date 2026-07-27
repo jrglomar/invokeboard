@@ -25,7 +25,7 @@ import { getConfig, getProjects, getOffsetPolicy, getAgingPolicy, type ProjectRe
 import { UpstreamError, ConfigError } from "./lib/errors.js";
 import { ZodError } from "zod";
 import { getAiProvider, getAiStatus } from "./lib/ai/provider.js";
-import { draftTickets, enhanceTicket, draftSprintSummary, planDevTickets } from "./lib/ai/draftService.js";
+import { draftTickets, enhanceTicket, draftSprintSummary, planDevTickets, draftPoStory } from "./lib/ai/draftService.js";
 import { askAssistant, askAssistantStream } from "./lib/ai/askService.js";
 import { taskHelperRouter } from "./routes/taskHelper.js";
 import { adminRouter } from "./routes/admin.js";
@@ -162,6 +162,23 @@ const planDevTicketsInputSchema = z.object({
         key: z.string().min(1),
         summary: z.string().min(1),
         description: z.string().optional(),
+      })
+    )
+    .min(1)
+    .max(20),
+  instructions: z.string().max(2000).optional(),
+});
+
+// ---- Input zod schema for draft-po-story AI endpoint (v1.72, ADR-083) ----
+
+const draftPoStoryInputSchema = z.object({
+  devTickets: z
+    .array(
+      z.object({
+        key: z.string().min(1),
+        summary: z.string().min(1),
+        description: z.string().optional(),
+        storyPoints: z.number().nonnegative().nullable().optional(),
       })
     )
     .min(1)
@@ -495,6 +512,55 @@ app.post("/api/ai/plan-dev-tickets", async (req, res) => {
     const result = await planDevTickets(
       provider,
       parsed.data.poStories,
+      parsed.data.instructions
+    );
+    res.json({ ok: true, data: result });
+  } catch (err) {
+    if (err instanceof UpstreamError) {
+      errorResponse(res, 502, "UPSTREAM", err.message);
+      return;
+    }
+    if (err instanceof ConfigError) {
+      errorResponse(res, 500, "CONFIG", err.message);
+      return;
+    }
+    const msg = err instanceof Error ? err.message : "Internal server error";
+    errorResponse(res, 500, "INTERNAL", msg);
+  }
+});
+
+// POST /api/ai/draft-po-story (v1.72, §4.9, ADR-083) — roll N Dev tasks up into ONE PO story
+app.post("/api/ai/draft-po-story", async (req, res) => {
+  const parsed = draftPoStoryInputSchema.safeParse(req.body);
+  if (!parsed.success) {
+    errorResponse(res, 400, "VALIDATION", "Input validation failed", parsed.error.issues);
+    return;
+  }
+
+  // Resolve provider
+  let provider;
+  try {
+    provider = await getAiProvider();
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      errorResponse(res, 500, "CONFIG", err.message);
+      return;
+    }
+    const msg = err instanceof Error ? err.message : "Internal server error";
+    errorResponse(res, 500, "INTERNAL", msg);
+    return;
+  }
+
+  if (provider === null) {
+    errorResponse(res, 503, "AI_UNAVAILABLE", AI_UNAVAILABLE_MSG);
+    return;
+  }
+
+  // Call service
+  try {
+    const result = await draftPoStory(
+      provider,
+      parsed.data.devTickets,
       parsed.data.instructions
     );
     res.json({ ok: true, data: result });

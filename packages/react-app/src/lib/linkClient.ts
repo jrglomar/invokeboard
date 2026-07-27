@@ -2,7 +2,12 @@
 // Wraps get_linked_issues via the HTTP bridge. Same McpError semantics as mcpClient.
 
 import { callTool } from "./mcpClient";
-import type { GetLinkedIssuesResponse, GetIssueDescriptionsResponse } from "./types";
+import type {
+  GetLinkedIssuesResponse,
+  GetIssueDescriptionsResponse,
+  LinkDevToPoResult,
+  UnlinkDevFromPoResult,
+} from "./types";
 
 /**
  * For each PO key, fetch its existing linked Dev tickets (default projectKey = Dev).
@@ -27,4 +32,30 @@ export async function getIssueDescriptions(
   keys: string[]
 ): Promise<GetIssueDescriptionsResponse> {
   return callTool<GetIssueDescriptionsResponse>("jira", "get_issue_descriptions", { keys });
+}
+
+/**
+ * Link an EXISTING Dev ticket to an EXISTING PO story (CONTRACTS.md §4.31, v1.72,
+ * ADR-083). One pair per call — bulk "Link N to PO-7" loops this sequentially through
+ * the shared bulk-run machine. `linkId` on the result is non-null ONLY when
+ * `alreadyLinked` is true.
+ */
+export async function linkDevToPo(
+  poKey: string,
+  devKey: string
+): Promise<LinkDevToPoResult> {
+  return callTool<LinkDevToPoResult>("jira", "link_dev_to_po", { poKey, devKey });
+}
+
+/**
+ * Remove a PO↔Dev link (CONTRACTS.md §4.32, v1.72, ADR-083). `poKey`/`devKey` are an
+ * optional guard — the Linking UI always sends them so a stale badge can never delete
+ * an unrelated link.
+ */
+export async function unlinkDevFromPo(input: {
+  linkId: string;
+  poKey?: string;
+  devKey?: string;
+}): Promise<UnlinkDevFromPoResult> {
+  return callTool<UnlinkDevFromPoResult>("jira", "unlink_dev_from_po", input);
 }

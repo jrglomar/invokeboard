@@ -649,6 +649,15 @@ describe("AI endpoints not in GET /api/tools", () => {
     // v1.11: plan-dev-tickets is bridge-only too
     expect(names).not.toContain("plan-dev-tickets");
   });
+
+  // v1.72 (ADR-083): draft-po-story is bridge-only REST, never an MCP tool (circular for Copilot).
+  it("GET /api/tools does not include draft-po-story", async () => {
+    const res = await fetch(`${baseUrl}/api/tools`);
+    const body = (await res.json()) as { data: { name: string }[] };
+    const names = body.data.map((t) => t.name);
+    expect(names).not.toContain("draft-po-story");
+    expect(names).not.toContain("ai/draft-po-story");
+  });
 });
 
 // ---- v1.11 (ADR-022): POST /api/ai/plan-dev-tickets ----
@@ -706,5 +715,78 @@ describe("POST /api/ai/plan-dev-tickets", () => {
     expect(body.data.items[0]!.poKey).toBe("PO-1");
     expect(body.data.items[1]!.devSummary).toBe("Add avatar upload");
     expect(body.data.provider).toBe("anthropic");
+  });
+});
+
+// ---- v1.72 (ADR-083): POST /api/ai/draft-po-story ----
+
+const validDraftPoStoryBody = {
+  devTickets: [
+    { key: "DEV-1", summary: "Build reset endpoint", storyPoints: 3 },
+    { key: "DEV-2", summary: "Add reset email template", storyPoints: 2 },
+  ],
+};
+
+describe("POST /api/ai/draft-po-story", () => {
+  it("returns 503 AI_UNAVAILABLE when AI_PROVIDER is unset", async () => {
+    const res = await post("/api/ai/draft-po-story", validDraftPoStoryBody);
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("AI_UNAVAILABLE");
+  });
+
+  it("returns 400 VALIDATION on an empty body", async () => {
+    process.env["AI_PROVIDER"] = "anthropic";
+    process.env["ANTHROPIC_API_KEY"] = "test-key-anthropic";
+    resetConfigCache();
+    const res = await post("/api/ai/draft-po-story", {});
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("VALIDATION");
+  });
+
+  it("returns 400 VALIDATION when devTickets is empty", async () => {
+    process.env["AI_PROVIDER"] = "anthropic";
+    process.env["ANTHROPIC_API_KEY"] = "test-key-anthropic";
+    resetConfigCache();
+    const res = await post("/api/ai/draft-po-story", { devTickets: [] });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("VALIDATION");
+  });
+
+  it("Anthropic happy path returns the rolled-up PO story draft", async () => {
+    process.env["AI_PROVIDER"] = "anthropic";
+    process.env["ANTHROPIC_API_KEY"] = "test-key-anthropic";
+    process.env["ANTHROPIC_MODEL"] = "claude-opus-4-8";
+    resetConfigCache();
+
+    const mockParsedOutput = {
+      assistantMessage: "Drafted one umbrella story covering both Dev tasks.",
+      summary: "Allow users to reset a forgotten password",
+      description: "## User Story\n...\n## Delivered by\n- DEV-1 — Build reset endpoint\n- DEV-2 — Add reset email template",
+    };
+    MockAnthropicClass.mockImplementation(() => ({
+      messages: { parse: vi.fn().mockResolvedValue({ parsed_output: mockParsedOutput }) },
+    }));
+
+    const res = await post("/api/ai/draft-po-story", validDraftPoStoryBody);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      data: {
+        assistantMessage: string;
+        summary: string;
+        description: string;
+        provider: string;
+        model: string;
+      };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.assistantMessage).toBe("Drafted one umbrella story covering both Dev tasks.");
+    expect(body.data.summary).toBe("Allow users to reset a forgotten password");
+    expect(body.data.description).toContain("DEV-1");
+    expect(body.data.provider).toBe("anthropic");
+    expect(body.data.model).toBe("claude-opus-4-8");
   });
 });

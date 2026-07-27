@@ -137,6 +137,9 @@ const EXPECTED_JIRA_TOOLS = [
   // v1.68 — PO draft capacity plan
   "get_draft_plan",
   "set_draft_plan",
+  // v1.72 (ADR-083) — link/unlink EXISTING PO ↔ Dev issues (Linking page modes 2 & 3)
+  "link_dev_to_po",
+  "unlink_dev_from_po",
 ];
 
 const EXPECTED_GITHUB_TOOLS = [
@@ -710,6 +713,23 @@ if (!jiraReady) {
     }
   } catch (e) {
     fail("[JIRA] POST /api/ai/plan-dev-tickets → 503 AI_UNAVAILABLE", String(e));
+  }
+
+  // JIRA v1.72 (ADR-083): AI draft-po-story (the inverse rollup) → 503 AI_UNAVAILABLE when AI
+  // disabled — the Linking "New PO from Dev tasks" mode falls back to a deterministic rollup.
+  try {
+    const { status, body } = await httpPost(
+      `http://127.0.0.1:${JIRA_PORT}/api/ai/draft-po-story`,
+      { devTickets: [{ key: "DEV-1", summary: "x" }] }
+    );
+    if (status === 503 && body.ok === false && body.error?.code === "AI_UNAVAILABLE") {
+      pass("[JIRA] POST /api/ai/draft-po-story → 503 AI_UNAVAILABLE when AI disabled");
+    } else {
+      fail("[JIRA] POST /api/ai/draft-po-story → 503 AI_UNAVAILABLE",
+        `status=${status} code=${body.error?.code} body=${JSON.stringify(body).slice(0, 200)}`);
+    }
+  } catch (e) {
+    fail("[JIRA] POST /api/ai/draft-po-story → 503 AI_UNAVAILABLE", String(e));
   }
 
   // JIRA v1.18: AI Q&A assistant /api/ai/ask → 503 AI_UNAVAILABLE when AI disabled

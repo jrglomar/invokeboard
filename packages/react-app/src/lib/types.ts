@@ -408,6 +408,16 @@ export interface LinkedIssue {
   summary: string;
   status: string;
   url: string;
+  /**
+   * v1.72 (ADR-083): the Jira issue-link id, its type name, and this row's direction
+   * relative to the queried key. OPTIONAL ON PURPOSE — the server always sends them,
+   * but making them required would force edits to test fixture literals in 3+ existing
+   * test files for zero gain (this endpoint predates §4.31/§4.32, which are what
+   * actually consume these fields to build the unlink control and dedupe check).
+   */
+  linkId?: string;
+  linkTypeName?: string;
+  direction?: "inward" | "outward";
 }
 
 /** get_linked_issues output — keyed by the input (PO) key. */
@@ -450,6 +460,60 @@ export interface PlanRow extends PlanDevTicketItem {
 export interface PlanDevTicketsResponse {
   assistantMessage: string;
   items: PlanDevTicketItem[];
+  provider: "anthropic" | "github";
+  model: string;
+}
+
+// ── Linking write types (CONTRACTS.md §4.31/§4.32/§4.9 draft-po-story, v1.72, ADR-083) ─
+
+/**
+ * link_dev_to_po output (CONTRACTS.md §4.31). `linkId` is non-null ONLY on the
+ * `alreadyLinked` path — Jira's create response has no body to read one back from.
+ * `reversed` is set when a pre-v1.42 link already exists with the keys swapped.
+ */
+export interface LinkDevToPoResult {
+  poKey: string;
+  devKey: string;
+  linkTypeName: string;
+  created: boolean;
+  alreadyLinked: boolean;
+  linkId: string | null;
+  reversed?: boolean;
+  precheckWarning?: string;
+}
+
+/**
+ * unlink_dev_from_po output (CONTRACTS.md §4.32). A missing/already-gone link is
+ * reported via `alreadyGone: true`, not an error — matches get_linked_issues'
+ * "missing key → []" resilience convention.
+ */
+export interface UnlinkDevFromPoResult {
+  linkId: string;
+  deleted: boolean;
+  alreadyGone: boolean;
+  poKey?: string;
+  devKey?: string;
+}
+
+/** POST /api/ai/draft-po-story request body (CONTRACTS.md §4.9 v1.72, ADR-083). */
+export interface DraftPoStoryRequest {
+  devTickets: Array<{
+    key: string;
+    summary: string;
+    description?: string;
+    storyPoints?: number | null;
+  }>;
+  instructions?: string;
+}
+
+/**
+ * POST /api/ai/draft-po-story response (CONTRACTS.md §4.9 v1.72, ADR-083). No
+ * `storyPoints` — deliberate; the client sums the selected Dev tickets' points itself.
+ */
+export interface DraftPoStoryResponse {
+  assistantMessage: string;
+  summary: string;
+  description: string;
   provider: "anthropic" | "github";
   model: string;
 }

@@ -1,7 +1,7 @@
 // aiClient tests — keyless/offline (mocks fetch globally)
 // CONTRACTS.md §4.9 v1.1, §7
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { getAiStatus, aiDraftTickets, aiEnhanceTicket } from "./aiClient";
+import { getAiStatus, aiDraftTickets, aiEnhanceTicket, aiDraftPoStory } from "./aiClient";
 import type { McpError } from "./mcpClient";
 
 // Mock fetch globally
@@ -236,6 +236,35 @@ describe("aiEnhanceTicket", () => {
 
     const url = mockFetch.mock.calls[0][0] as string;
     expect(url).toContain("/api/ai/enhance-ticket");
+    const init = mockFetch.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(init.body as string)).toEqual(body);
+  });
+});
+
+// ── aiDraftPoStory (v1.72, ADR-083) ────────────────────────────────────────────
+
+describe("aiDraftPoStory", () => {
+  it("POSTs to /api/ai/draft-po-story and unwraps { ok: true, data }", async () => {
+    const draftRes = {
+      assistantMessage: "Rolled up 2 Dev tasks",
+      summary: "Password reset",
+      description: "## User Story\n\n...",
+      provider: "anthropic" as const,
+      model: "claude-opus-4-8",
+    };
+    mockFetch.mockResolvedValueOnce(makeResponse({ ok: true, data: draftRes }));
+
+    const body = {
+      devTickets: [
+        { key: "DEV-1", summary: "Add reset endpoint" },
+        { key: "DEV-2", summary: "Add reset email", description: "uses SES" },
+      ],
+    };
+    const result = await aiDraftPoStory(body);
+
+    expect(result).toEqual(draftRes);
+    const url = mockFetch.mock.calls[0][0] as string;
+    expect(url).toContain("/api/ai/draft-po-story");
     const init = mockFetch.mock.calls[0][1] as RequestInit;
     expect(JSON.parse(init.body as string)).toEqual(body);
   });

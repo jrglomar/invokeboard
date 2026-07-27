@@ -30,6 +30,9 @@ const ASK_SERVICE_READ_TOOLS: readonly string[] = [
   "get_meeting_notes",
   "get_retro",
   "get_multi_sprint_report",
+  // v1.68 (ADR-079) — was missing from this copy AND from toolCatalog.ts until v1.72;
+  // the two omissions cancelled out, so ANTI-DRIFT A passed while both were wrong.
+  "get_draft_plan",
 ];
 
 // hand-synced copy — must match packages/mcp-jira/src/lib/ai/askService.ts (WRITE_TOOLS)
@@ -53,6 +56,9 @@ const DELEGATION_JIRA_WRITE_TOOLS: readonly string[] = [
   "assign_issue",
   "transition_issue",
   "move_issue_to_sprint",
+  // v1.72 (ADR-083) — linking existing issues mutates Jira, so both are write-gated
+  "link_dev_to_po",
+  "unlink_dev_from_po",
 ];
 
 const EXPECTED_GROUP_COUNTS: Record<ToolGroup, number> = {
@@ -60,10 +66,10 @@ const EXPECTED_GROUP_COUNTS: Record<ToolGroup, number> = {
   "Sprint reads": 3,
   "Sprint management": 5,
   "Reports & velocity": 3,
-  "Assignment & roster": 5,
+  "Assignment & roster": 7,
   "Leaves & offset wallet": 8,
   "Huddle stores": 12,
-  "Linking & PR visibility": 2,
+  "Linking & PR visibility": 4,
   "GitHub pull requests": 5,
 };
 
@@ -73,8 +79,8 @@ function sortedNames(entries: { name: string }[]): string[] {
 }
 
 describe("TOOL_CATALOG", () => {
-  it("has exactly 48 rows", () => {
-    expect(TOOL_CATALOG.length).toBe(48);
+  it("has exactly 52 rows", () => {
+    expect(TOOL_CATALOG.length).toBe(52);
   });
 
   it("has the expected count per group", () => {
@@ -85,13 +91,14 @@ describe("TOOL_CATALOG", () => {
 
   it("has unique tool names", () => {
     const names = new Set(TOOL_CATALOG.map((t) => t.name));
-    expect(names.size).toBe(48);
+    expect(names.size).toBe(52);
   });
 
-  it("splits 43 mcp-jira / 5 mcp-github by server", () => {
+  it("splits 47 mcp-jira / 5 mcp-github by server", () => {
     const jira = TOOL_CATALOG.filter((t) => t.server === "mcp-jira");
     const github = TOOL_CATALOG.filter((t) => t.server === "mcp-github");
-    expect(jira.length).toBe(43);
+    // 47 === the mcp-jira registry's tool count (scripts/smoke.mjs EXPECTED_JIRA_TOOLS)
+    expect(jira.length).toBe(47);
     expect(github.length).toBe(5);
   });
 
@@ -100,9 +107,9 @@ describe("TOOL_CATALOG", () => {
       TOOL_CATALOG.filter((t) => t.surface === surface && t.access === access).length;
 
     expect(count("jira", "read")).toBe(13);
-    expect(count("jira", "write")).toBe(8);
-    expect(count("local", "read")).toBe(10);
-    expect(count("local", "write")).toBe(12);
+    expect(count("jira", "write")).toBe(10);
+    expect(count("local", "read")).toBe(11);
+    expect(count("local", "write")).toBe(13);
     expect(count("github", "read")).toBe(3);
     expect(count("github", "write")).toBe(2);
   });

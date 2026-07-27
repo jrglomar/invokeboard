@@ -214,6 +214,13 @@ describe("Admin user CRUD + shared credentials (v1.46, ADR-056)", () => {
     expect(r.json.error.code).toBe("READ_ONLY_USER");
   });
 
+  // v1.72 (ADR-083): link_dev_to_po was added to JIRA_WRITE_TOOLS — regression guard.
+  it("blocks link_dev_to_po for a borrower (403 READ_ONLY_USER)", async () => {
+    const r = await req("POST", "/api/tools/link_dev_to_po", { poKey: "PO-1", devKey: "DEV-1" }, viewerCookie);
+    expect(r.status).toBe(403);
+    expect(r.json.error.code).toBe("READ_ONLY_USER");
+  });
+
   it("still allows non-Jira (local store) tools for a borrower", async () => {
     const r = await req("POST", "/api/tools/get_retro", {}, viewerCookie);
     expect(r.status).not.toBe(403); // validation may reject the body, but never authorization

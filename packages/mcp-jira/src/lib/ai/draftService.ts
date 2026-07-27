@@ -62,6 +62,15 @@ export const PlanDevTicketsOutputSchema = z.object({
 
 export type PlanDevTicketsOutput = z.infer<typeof PlanDevTicketsOutputSchema>;
 
+// v1.72 (ADR-083): roll N existing Dev tasks up into ONE PO story — the inverse of plan-dev-tickets.
+export const DraftPoStoryOutputSchema = z.object({
+  assistantMessage: z.string(),
+  summary: z.string(),
+  description: z.string(),
+});
+
+export type DraftPoStoryOutput = z.infer<typeof DraftPoStoryOutputSchema>;
+
 // ---------------------------------------------------------------------------
 // System prompts — same conventions as lib/prompts.ts
 // ---------------------------------------------------------------------------
@@ -216,6 +225,50 @@ BEHAVIOUR:
 - Keep each devSummary under 255 characters.
 - Be concrete and technical; note dependencies between tasks where relevant.`;
 
+// v1.72 (ADR-083): the INVERSE of PLAN_DEV_SYSTEM — roll N existing Dev tasks up into ONE PO story.
+const PO_ROLLUP_SYSTEM = `You are an expert Agile coach and Product Owner. You are given a set of existing Dev tasks and must roll them up into ONE Product Owner story that covers all of them.
+
+IMPORTANT: You MUST return a JSON object matching this schema exactly (no extra fields):
+{
+  "assistantMessage": "1-3 sentence overview of the rollup and any assumptions made; if the tasks look unrelated, say so here and still write the best single umbrella story",
+  "summary": "concise story summary, max 255 chars, written as business value — NEVER a list of Jira keys",
+  "description": "full description with ## headings and - bullets"
+}
+
+Write EXACTLY one PO story that covers ALL of the given Dev tasks — never split into multiple stories.
+
+Never invent work that is not represented in the given tasks. Derive the acceptance criteria strictly from their actual content.
+
+Description format — use EXACTLY these conventions so the text converts cleanly to Atlassian Document Format:
+- Use "## " headings
+- Use "- " bullet list items
+- Blank lines between paragraphs
+
+PO Story description template:
+## User Story
+As a [specific role], I want [clear goal], so that [concrete business benefit].
+
+## Acceptance Criteria
+- Given [initial context] / When [action taken] / Then [expected outcome]
+- Given [initial context] / When [action taken] / Then [expected outcome]
+
+## Scope
+- [what is included, derived from the given tasks]
+
+## Out of Scope
+- [explicit exclusions]
+
+## Delivered by
+- KEY — title
+- KEY — title
+
+BEHAVIOUR:
+- Exactly one PO story covering ALL given Dev tasks; do not omit any.
+- The "## Delivered by" section must list one "- KEY — title" bullet per Dev task given, using its exact key.
+- If the tasks appear unrelated, say so plainly in assistantMessage and still write the best single umbrella story.
+- Keep summary under 255 characters; it must read as business value, never a bare list of ticket keys.
+- Do NOT emit story points anywhere in the output — the caller computes them as an arithmetic sum.`;
+
 // ---------------------------------------------------------------------------
 // Service functions
 // ---------------------------------------------------------------------------
@@ -345,6 +398,50 @@ export async function planDevTickets(
     PLAN_DEV_SYSTEM,
     messages,
     PlanDevTicketsOutputSchema
+  );
+
+  return {
+    ...output,
+    provider: provider.name,
+    model: provider.model,
+  };
+}
+
+/**
+ * Roll N existing Dev tasks up into ONE PO story — the inverse of planDevTickets
+ * (v1.72, §4.9, ADR-083). No storyPoints in the output: the caller sums the selected
+ * Dev tickets' points arithmetically and seeds that into an editable field.
+ */
+export async function draftPoStory(
+  provider: AiProvider,
+  devTickets: Array<{ key: string; summary: string; description?: string; storyPoints?: number | null }>,
+  instructions?: string
+): Promise<DraftPoStoryOutput & { provider: "anthropic" | "github"; model: string }> {
+  const lines = devTickets
+    .map(
+      (t, i) =>
+        `${i + 1}. [${t.key}] ${t.summary}` +
+        (t.description ? `\n   Details: ${t.description}` : "")
+    )
+    .join("\n");
+
+  const userContent = [
+    "Write ONE Product Owner story that covers ALL of these Dev tasks.",
+    instructions ? `Global instructions: ${instructions}` : "",
+    `Dev tasks:\n${lines}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const messages: Array<{ role: "user" | "assistant"; content: string }> = [
+    { role: "user", content: userContent },
+  ];
+
+  const output = await callProvider(
+    provider,
+    PO_ROLLUP_SYSTEM,
+    messages,
+    DraftPoStoryOutputSchema
   );
 
   return {

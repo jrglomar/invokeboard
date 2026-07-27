@@ -127,6 +127,9 @@ Do not add tests that require real credentials or network calls.
 | Active-sprint selection (latest-first, pure) | `packages/mcp-jira/src/lib/sprintSelect.ts` |
 | PO draft capacity plan store | `packages/mcp-jira/src/lib/draftPlanStore.ts` |
 | Draft Capacity Plan card + PO↔Dev sprint pairing | `packages/react-app/src/components/DraftPlanCard.tsx`, `src/lib/sprintPairing.ts` |
+| Linking page modes (create-dev / link-existing / new-po) + shared Dev picker | `packages/react-app/src/components/linking/` |
+| Sequential bulk-write machine + status log (Linking modes) | `packages/react-app/src/hooks/useBulkRun.ts`, `src/components/BulkStatusLog.tsx` |
+| PO↔Dev link/unlink tools (existing issues) | `packages/mcp-jira/src/tools/linkDevToPo.ts`, `unlinkDevFromPo.ts` |
 | Shared per-ticket action cells (points/status/move/rename) — Assign Tickets only | `packages/react-app/src/components/ticketCells.tsx` |
 | Real breakdown dialog (creates PO sub-stories) — Assign Tickets | `packages/react-app/src/components/BreakdownDialog.tsx` |
 | Draft point-split rollups (per-developer share totals) | `packages/react-app/src/lib/draftPlan.ts` |

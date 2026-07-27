@@ -78,4 +78,6 @@ export const JIRA_WRITE_TOOLS: ReadonlySet<string> = new Set([
   "assign_issue",
   "transition_issue",
   "move_issue_to_sprint",
+  "link_dev_to_po",
+  "unlink_dev_from_po",
 ]);

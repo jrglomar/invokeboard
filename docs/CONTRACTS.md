@@ -548,6 +548,32 @@ export interface AiProvider {
   `items` to the selected POs by `poKey`; any PO the model omits falls back to a deterministic
   template client-side. The UI reviews/edits the plan before bulk-creating via `create_dev_ticket`.
 
+`POST /api/ai/draft-po-story` (v1.72 — roll N existing Dev tasks up into ONE PO story; ADR-083)
+- **Input (zod):** `{ devTickets: Array<{ key: string, summary: string, description?: string,
+  storyPoints?: number | null }> (1..20), instructions?: string (≤2000) }` — the selected Dev
+  tickets the user wants a covering PO story for.
+- **Behavior:** ONE provider call — the **inverse** of `plan-dev-tickets`. The system prompt asks
+  the model to write **exactly one** PO story that covers ALL the given Dev tasks, deriving the
+  acceptance criteria from the tasks' real content and never inventing work not represented in
+  them (same ADF description conventions — `## ` headings + `- ` bullets). Description template:
+  `## User Story` → `## Acceptance Criteria` (Given/When/Then) → `## Scope` / `## Out of Scope` →
+  `## Delivered by` (one `- KEY — title` bullet per Dev task). `summary` is business value in
+  ≤255 chars, never a list of Jira keys. When the tasks are unrelated the model says so in
+  `assistantMessage` and still writes the best single umbrella story. `instructions` carries the
+  reviewer's "comment & regenerate" text (§6, same pattern as §4.9 `plan-dev-tickets`).
+  Bridge-only REST, NEVER an MCP tool (circular for Copilot). Lives in `lib/ai/draftService.ts`
+  (`draftPoStory` + `DraftPoStoryOutputSchema`, zod/v4).
+- **Output:** `{ assistantMessage: string; summary: string; description: string;
+  provider: "anthropic" | "github"; model: string }`
+- **No `storyPoints` in the output — deliberate.** The new PO story's points are the arithmetic
+  **sum** of the selected Dev tickets' points, computed client-side and seeded into an editable
+  field. Asking the model for a number it cannot compute more accurately invites a wrong value
+  the user must catch (contrast §4.9 `draft-tickets`, where there is no source figure to sum).
+- The endpoint does NOT create or link anything — the client reviews/edits the draft, then calls
+  `create_po_ticket` (§4.1) followed by `link_dev_to_po` (§4.31) per Dev ticket.
+- AI off/unavailable → `503 AI_UNAVAILABLE`; the client falls back to a deterministic rollup
+  template (`react-app` `lib/poRollup.ts`) so the workflow never blocks.
+
 `POST /api/ai/ask` (v1.18 — in-app AI Q&A assistant; ADR-029)
 - **Input (zod):** `{ question: string (1..2000), boardId?: number, sprintId?: number,
   history?: Array<{ role: "user"|"assistant"; content: string (1..2000) }> (max 8) }` — a
@@ -840,21 +866,45 @@ export interface TeamMember { accountId: string; displayName: string }
   `JIRA_TEAM_FILE` at a temp path / mock the Jira client; keyless/offline; cover recent-assignee
   derivation (distinct + counts + sort, null-assignee skip), team round-trip set→get, replace/clear.
 
-### 4.17 `get_linked_issues` (v1.11 — existing PO→Dev links; ADR-022)
+### 4.17 `get_linked_issues` (v1.11 — existing PO↔Dev links; ADR-022, amended v1.72/ADR-083)
 
-Used by the Linking page to show whether a PO story already has a linked Dev ticket
-("one or none") so bulk creation doesn't duplicate.
+Used by the Linking page to show which Dev tickets a PO story already links to, so bulk
+creation doesn't duplicate. **A PO story may link to MANY Dev tickets** — the output has always
+been an array per key, and ADR-046 ships 1–2 Dev tasks per PO by point breakdown. (Pre-v1.72
+this section said "one or none"; that was only ever a UI selection heuristic — a PO with an
+existing link is deselected by default but still selectable — never a data or backend
+constraint. v1.72/ADR-083 makes many-Dev→1-PO an explicit, user-driven write path.)
 
 - **Input:** `{ keys: string[] (1+), projectKey?: string }`. `projectKey` filters the
   returned links to a project (default = `JIRA_DEV_PROJECT_KEY`, i.e. only the Dev tickets
-  linked to each PO). Pass `projectKey: ""` to return links to ANY project.
+  linked to each PO). Pass `projectKey: ""` to return links to ANY project. **To read a Dev
+  ticket's PO links (v1.72, Linking "Link existing" mode) the caller MUST pass the PO project
+  key explicitly** — the default filter is the Dev project and would return `[]` for every key.
 - **Behavior:** for each key, fetch the issue's `issuelinks`
-  (`GET /rest/api/3/issue/{key}?fields=issuelinks,summary,status`), take the linked issue on
+  (`GET /rest/api/3/issue/{key}?fields=issuelinks`), take the linked issue on
   each link (`inwardIssue ?? outwardIssue`), and keep those whose key is in `projectKey`
   (prefix `${projectKey}-`). Fetches run in parallel. A missing/unreadable key contributes an
   empty array (non-fatal — never throws for one bad key).
-- **Output:** `{ links: Record<string, Array<{ key: string; summary: string; status: string; url: string }>> }`
-  keyed by the input PO key (every input key present; `[]` when no matching links).
+- **Output:** `{ links: Record<string, LinkedIssueRef[]> }` keyed by the input key (every input
+  key present; `[]` when no matching links), where **(v1.72, ADR-083)**:
+  ```ts
+  export interface LinkedIssueRef {
+    key: string; summary: string; status: string; url: string;
+    linkId: string;                        // v1.72 — the Jira issue-link id; the DELETE target for §4.32
+    linkTypeName: string;                  // v1.72 — e.g. "Depends on"
+    direction: "inward" | "outward";       // v1.72 — which side the OTHER issue sits on
+  }
+  ```
+  All three new fields come from the payload **already fetched** — no extra Jira call.
+  `direction` is `"inward"` when Jira populated `inwardIssue` (⇒ THIS issue is the outward side)
+  and `"outward"` otherwise. It is **not** redundant with the key prefix: Jira returns only the
+  *other* side of each link, so reading a PO story yields `outwardIssue: DEV-x` (PO inward, per
+  §4.2) while reading a Dev ticket yields `inwardIssue: PO-y`. The Linking "Link existing" mode
+  reads from the **Dev** side, so without `direction` it cannot tell a canonical v1.42+ link
+  from a pre-v1.42 reversed one. `linkTypeName` is what the UI renders beside an Unlink control
+  so the user knows which of several links they are removing.
+  When Jira omits an id, `linkId` is `""` — the UI treats empty as "not unlinkable" and disables
+  the control rather than crashing (same fallback discipline as `summary: ""`).
 - New jiraClient helper `getLinkedIssues(key)` → all linked issues of one key (the tool filters).
 - Registered MCP tool (stdio + `/api/tools` + bridge). Tests mock the Jira client; keyless.
 
@@ -1168,6 +1218,85 @@ export interface DraftShare { accountId: string; displayName: string; points: nu
   empty-array-key → VALIDATION, the legacy single-object → array migration, full-replace,
   clear-deletes-entry, bad issue key → VALIDATION, missing/corrupt-file tolerance.
 
+### 4.31 `link_dev_to_po` (v1.72, ADR-083 — link an EXISTING Dev ticket to an EXISTING PO story)
+
+**WRITE.** Before v1.72 a PO↔Dev link could only be born inside `create_dev_ticket` (§4.2), so a
+Dev ticket that already existed could never be attached to its PO story. This tool is that
+missing write path, and it is what the Linking page's **"Link existing"** and **"New PO from Dev
+tasks"** modes (§6) both call.
+
+**One pair per call — the client loops**, exactly as §6 already specifies for `create_dev_ticket`
+("No new bulk MCP tool"). Per-item ✓/✗, the live status log, and "Retry failed" therefore work
+unchanged. Deliberately **not** a generic `link_issues({ inwardKey, outwardKey })`: the direction
+invariant below is the most error-prone thing in this subsystem (it shipped backwards once and
+was swapped in v1.42), and a generic tool re-exports that trap to every caller, including Copilot
+over stdio which has no UI to get it right.
+
+- **Input:** `{ poKey: string, devKey: string }` — both must match the §4.4 ticketKey regex
+  `/^[A-Z][A-Z0-9]{1,9}-\d+$/`, and `poKey !== devKey` (a self-link is `400 VALIDATION`).
+- **Behavior:**
+  1. **Dedupe pre-check (non-fatal).** Read `getLinkedIssues(poKey)` and look for a link whose
+     other key is `devKey` **and** whose `linkTypeName` is the configured `JIRA_LINK_TYPE`. A hit
+     returns `{ created: false, alreadyLinked: true, linkId }` **without POSTing**. The match
+     deliberately **ignores direction**: a pre-v1.42 reversed link is still a link, and stacking
+     the canonical one on top would leave two rows asserting opposite dependencies — that case
+     returns `reversed: true` so the UI can label it. If this read throws, set `precheckWarning`
+     and **continue to step 2** — a broken read must never block a legitimate write.
+  2. `POST /rest/api/3/issueLink` with
+     `{ "type": { "name": "<JIRA_LINK_TYPE>" }, "inwardIssue": { "key": "<poKey>" }, "outwardIssue": { "key": "<devKey>" } }`
+     — **PO is the inward side, Dev the outward side**, identical to §4.2 and for the same
+     live-verified reason (the inward issue displays the type's OUTWARD description, so this
+     reads "PO story depends on Dev task"). Unlike §4.2, a link failure here **throws** (`502
+     UPSTREAM`) rather than degrading to a warning: in §4.2 the link is a side-effect of a
+     successful create, whereas here the link **is** the operation.
+- **Output:** `{ poKey: string; devKey: string; linkTypeName: string; created: boolean;
+  alreadyLinked: boolean; linkId: string | null; reversed?: boolean; precheckWarning?: string }`
+- **`linkId` is non-null ONLY on the `alreadyLinked` path.** Jira's `POST /rest/api/3/issueLink`
+  answers **201 with an empty body** — the new link's id is not returned. Rather than spend N
+  extra GETs reading it back, the caller refetches `get_linked_issues` **once** after its bulk
+  loop (it must refetch anyway to refresh every row's badge consistently).
+- **Idempotency caveat, deliberate and documented:** Jira's REST API has historically *permitted*
+  duplicate links between the same pair with the same type even though the web UI blocks them,
+  and the 201-empty-body response cannot reveal it. **Do not rely on Jira deduping** — the step-1
+  pre-check is the guarantee.
+- **Known asymmetry:** `JIRA_LINK_TYPE` is per-user overridable (§9), so dedupe — which filters on
+  key **+ the current user's configured type** — cannot see a link created under a different type.
+  The UI compensates by badging "already linked" for links of **any** type (showing
+  `linkTypeName`); only the skip-the-POST decision is type-scoped. This is intended, not a bug.
+- New jiraClient surface: none — reuses `createIssueLink` (§4.2) and `getLinkedIssues` (§4.17).
+- Registered MCP tool (stdio + `/api/tools` + bridge) **and added to `JIRA_WRITE_TOOLS`**
+  (§9.8.2) — it mutates Jira, so a shared-credential read-only user must get `403 READ_ONLY_USER`.
+  Not added to the AI Q&A write-allowlist (§4.9): the assistant has no linking workflow and each
+  proposal surface needs its own confirmation copy. Tests mock the Jira client; keyless.
+
+### 4.32 `unlink_dev_from_po` (v1.72, ADR-083 — remove a PO↔Dev link)
+
+**WRITE.** The counterpart to §4.31 — a mis-link had to be fixed in Jira directly before v1.72.
+
+- **Input:** `{ linkId: string (1+), poKey?: string, devKey?: string }`. The two keys are an
+  optional **guard**; the Linking UI always sends them.
+- **Behavior:**
+  1. **Guard (only when both keys are supplied).** Read `getLinkedIssues(poKey)`:
+     no link with that `linkId` → `{ deleted: false, alreadyGone: true }` with **no DELETE
+     issued**; a link with that `linkId` whose other key is **not** `devKey` → throw an
+     `UpstreamError(…, 409)` carrying the message `Link <id> does not connect <poKey> and
+     <devKey> — refresh and try again`. A stale UI must never delete an unrelated link.
+     **On the wire this surfaces as `502 UPSTREAM`** — the bridge maps every `UpstreamError`
+     to 502 regardless of its `status` field (§2), so the 409 is an internal marker, not the
+     HTTP status. The message is what the UI shows.
+  2. `DELETE /rest/api/3/issueLink/{linkId}` → 204. A **404 is treated as success**
+     (`{ deleted: false, alreadyGone: true }`), matching §4.17's "missing key → `[]`" resilience
+     convention; Jira returns 404 both when the link is already gone and when the caller cannot
+     see it, and the two are indistinguishable. A 403 (caller lacks Jira's *Link Issues*
+     permission — reachable even for a user who passes our own write gate) surfaces Jira's
+     message verbatim as `502 UPSTREAM`.
+- **Output:** `{ linkId: string; deleted: boolean; alreadyGone: boolean; poKey?: string; devKey?: string }`
+- `linkId` is a **string** in Jira's payload — never parse it as a number.
+- New jiraClient helper `deleteIssueLink(linkId): Promise<boolean>` (false on 404), beside
+  `createIssueLink`.
+- Registered MCP tool (stdio + `/api/tools` + bridge) **and added to `JIRA_WRITE_TOOLS`**
+  (§9.8.2). Not on the AI Q&A allowlists. Tests mock the Jira client; keyless.
+
 ## 5. mcp-github tools (Phase 2) — exact IO
 
 ```ts
@@ -1400,13 +1529,32 @@ Dedupe, preserve first-seen order. Pure function, unit-tested. No side effects.
       `getRecentAssignees`), `useTeamMembers(boardId)`, `useRecentAssignees(boardId)`; a
       `TeamManager` component. `useAssignableUsers` powers the v1.9 **"Search all people"**
       add box in TeamManager. Reuse `useLeaves`, `capacity.ts`, `useActiveSprint`. a11y + states.
-  - **Linking (NEW page, v1.11 — ADR-022)** — bulk-create Dev tasks for existing PO stories.
-    A guided workflow on its own tab (`pages/Linking.tsx`):
+  - **Linking (page, v1.11 — ADR-022; 3 modes since v1.72 — ADR-083)** — the PO↔Dev link surface.
+    `pages/Linking.tsx` is a **shell**: it owns the boards/sprint-list/team/AI-status hooks, the
+    `poSprintId`/`devSprintId`/`mode` state, the shared sprint-context card, a 3-way mode toggle
+    (`role="group"`, `aria-pressed` buttons — same pattern as the Reports mode toggle), the
+    bridge-offline alert, and a 3-way render switch. **No flow logic lives in the shell**; each
+    mode is its own component under `src/components/linking/`.
+
+    **Mode-dependent sprint-select semantics** (the two selects are shared across modes):
+
+    | mode | PO select | Dev select |
+    |---|---|---|
+    | `create-dev` (default) | source — active+future+closed | **target** — active+future, "Backlog / no sprint" |
+    | `link-existing` | source — active+future+closed | **source** — active+future |
+    | `new-po` | **target for the new story** — active+future, "Backlog / no sprint" | **source** — active+future |
+
+    Their accessible names stay **`"PO board sprint"` / `"Dev board sprint"` in every mode** (only
+    the visible sub-caption changes, source vs target) so a11y queries are stable. New **source**
+    pickers offer active+future only — `get_active_sprint` rejects a closed sprint id
+    (`sprintSelect.ts`), a pre-existing limitation of the mode-1 PO picker that is not replicated.
+
+    **Mode 1 — "Create Dev tasks" (v1.11, the original flow, unchanged):**
     1. **Pick a PO board sprint** (`list_sprints` on `boards.po.id`) and the **target Dev
        sprint** (`list_sprints` on `boards.dev.id`).
     2. **Multi-select PO tickets** — the PO sprint's tickets (`get_active_sprint(po.id,
-       sprintId)`, all buckets) as a **checkbox list**. Each row shows the existing **linked Dev
-       ticket(s)** (`get_linked_issues(keys, projectKey=dev)` — "one or none"): a row that
+       sprintId)`, all buckets) as a **checkbox list**. Each row shows its existing **linked Dev
+       ticket(s)** (`get_linked_issues(keys, projectKey=dev)`): a row that
        already has a Dev link is badged (e.g. "→ DEV-123") and **deselected by default** (to
        avoid duplicates), but can still be selected. "Select all without a Dev link" helper.
     3. **Generate the plan with AI** — on Generate, first fetch the selected PO stories' **own
@@ -1432,6 +1580,57 @@ Dedupe, preserve first-seen order. Pure function, unit-tested. No side effects.
     `planDevTickets`), reuse `createLinkedDevTicket` (v1.10), `useActiveSprint`, `useSprintList`,
     `useBoards`, `buildDraftPair`. a11y: labeled checkboxes, `role="status"`/`aria-live` log,
     keyboard-OK.
+
+    **Mode 2 — "Link existing" (v1.72, ADR-083)** — attach EXISTING Dev tickets to an EXISTING
+    PO story (**many Dev → 1 PO**), and remove wrong links:
+    1. **Target PO story** — a native `<select>` over the PO sprint's tickets (`PO-7 — summary`),
+       with a read-only card beneath showing its points and current Dev links.
+    2. **Dev candidates** — the Dev sprint's tickets (`get_active_sprint(dev.id, devSprintId)`,
+       all buckets) in a shared `DevTicketPicker`: checkbox list, select-all header checkbox,
+       an **"unlinked only"** toggle and an **assignee filter** (native selects, ADR-009 — there
+       is no free-text search anywhere in the app). Each row is badged with its current PO links
+       from `get_linked_issues(devKeys, projectKey=<PO project>)` — note the **explicit PO
+       project key** (§4.17); the default filter is the Dev project and would return nothing.
+    3. **Link N to PO-7** — the client loops `link_dev_to_po({ poKey, devKey })` **sequentially**
+       through the shared bulk-run machine, with the same live status log and "Retry failed" as
+       mode 1. A row that comes back `alreadyLinked: true` renders as a muted ✓ **"already
+       linked"**, NOT an error. One `get_linked_issues` refetch after the run refreshes every
+       badge and link id.
+    4. **Unlink** — each PO badge carries an inline **two-click confirm** control (`aria-label`
+       `"Unlink DEV-1 from PO-7"` → `"Confirm unlink DEV-1 from PO-7"`, auto-resetting), calling
+       `unlink_dev_from_po({ linkId, poKey, devKey })` — always sending the guard keys (§4.32) —
+       then refetching. A falsy `linkId` disables the control rather than risking a bad DELETE.
+
+    **Mode 3 — "New PO from Dev tasks" (v1.72, ADR-083)** — the inverse of mode 1: create ONE new
+    PO story that covers N existing Dev tickets:
+    1. **Dev candidates** — the same `DevTicketPicker` (no unlink control), capped at **20**
+       selected for the AI path (§4.9 `draft-po-story`); the draft button disables past the cap
+       with an inline hint rather than letting the request 400.
+    2. **Draft the PO story** — fetch the selected Dev tickets' descriptions
+       (`get_issue_descriptions`, §4.18) then `POST /api/ai/draft-po-story`. AI off / 503 / any
+       AI error → the deterministic `lib/poRollup.ts` rollup, with the same explanatory banner
+       convention as mode 1.
+    3. **Review/edit** — title, description, and a **points** field seeded with the arithmetic
+       **sum** of the selected Dev tickets' points (all editable), plus `RefineDraftControl`
+       ("comment & regenerate", re-calling `draft-po-story` with `instructions`) when AI is on.
+    4. **Create & link** — `create_po_ticket({ summary, description, storyPoints?, sprintId: <PO
+       sprint> })` (its `sprintWarning` surfaced non-fatally, §4.1), then the client loops
+       `link_dev_to_po({ poKey: <new key>, devKey })` per selected Dev ticket through the same
+       bulk-run machine. **The created PO key is held in state so "Retry failed" re-links ONLY —
+       it must never re-run `create_po_ticket` and duplicate the story.** If the create itself
+       fails, abort before any link: no orphan PO, no orphan links.
+
+    **Read-only users** (shared-credential, §9.8.2): modes 2 and 3 disable their submit controls
+    behind a one-line banner, so the user sees one explanation instead of N × `403 READ_ONLY_USER`
+    rows in the status log.
+
+    **Shared extractions (v1.72)** — `hooks/useBulkRun.ts` (the sequential write loop + per-row
+    status + `retryFailed`, lifted verbatim from mode 1), `components/BulkStatusLog.tsx`
+    (`<ul role="status" aria-live="polite">` + Retry/Start over), `components/SprintSelect.tsx`
+    (the native `<optgroup>` picker with a `groups` prop), `lib/issues.ts` (`flattenIssues`),
+    `lib/poRollup.ts` (deterministic rollup + `capDesc`), and
+    `components/linking/DevTicketPicker.tsx` (shared by modes 2 and 3). Reuses the existing
+    `RefineDraftControl`, `getIssueDescriptions`, and `createPoTicket`.
   - **Dashboard sprint-goal banner (v1.13, ADR-024):** above the board, show the active
     sprint's **goal** with a compact progress read — `% of points done (DoD = done OR code
     review)` and **days left** (from the sprint end date) — so the goal is the visible north
@@ -2372,7 +2571,8 @@ Changes made by the Architect agent during finalization:
 76. **§6 — new Linking page/tab (bulk PO→Dev).** The v1.10 single-PO `LinkDevTicketCard` is
     MOVED off Planning into a dedicated **Linking** tab and generalised to **bulk**: pick a PO
     sprint + a target Dev sprint → **multi-select** PO tickets (each showing its existing linked
-    Dev ticket, "one or none") → **AI plan** (one Dev draft per PO) → **Create all** with a live
+    Dev ticket, "one or none" — *superseded, see v1.72/ADR-083: a PO story may link to many Dev
+    tickets, and v1.72 adds an explicit write path for it*) → **AI plan** (one Dev draft per PO) → **Create all** with a live
     per-item **status log**. Tab nav becomes **Dashboard · Planning · Linking · Reports**.
 77. **§4.17 (new) — `get_linked_issues`** `{ keys[], projectKey? }` → `{ links: { poKey:
     LinkedIssue[] } }` (existing Dev tickets linked to each PO; parallel; per-key non-fatal). New
@@ -3224,3 +3424,68 @@ No tool names, routes, ports, or error codes change. The rename touches identity
     (Markdown sanitize/render 4, aiClient SSE parser 5, ChatPanel stream + trace + card + fallback 3);
     mcp-github 57 unchanged; smoke 60 → **61** (stream 503 parity). react-app version pill 1.70.0 →
     **1.71.0**.
+
+## Changelog v1.72 (2026-07-27 — link EXISTING Dev tickets to a PO story (+ unlink), and roll Dev tickets up into a NEW PO story; ADR-083)
+
+212. **§4.31/§4.32 (new) — `link_dev_to_po` / `unlink_dev_from_po`.** Until v1.72 a PO↔Dev link
+    could only be born inside `create_dev_ticket`, so a Dev ticket that already existed could never
+    be attached to its PO story, and a wrong link could only be fixed in Jira directly. Two new
+    **write** tools close that gap, **one pair per call — the client loops** (the same precedent §6
+    sets for `create_dev_ticket`; no bulk MCP tool). Deliberately domain-shaped rather than a
+    generic `link_issues({ inwardKey, outwardKey })`: the PO-inward/Dev-outward direction invariant
+    shipped backwards once already (v1.42), and a generic tool re-exports that trap to every caller
+    including Copilot over stdio. `link_dev_to_po` **pre-checks for an existing link and skips the
+    POST** (`alreadyLinked`), flags a pre-v1.42 reversed link as `reversed`, and treats a *failed*
+    pre-check as non-fatal (`precheckWarning`) so a broken read never blocks a legitimate write.
+    `unlink_dev_from_po` verifies the link id actually connects the supplied pair before deleting,
+    and treats Jira's 404 as success (`alreadyGone`) since Jira returns it both for "already gone"
+    and "you can't see it". Both added to **`JIRA_WRITE_TOOLS`** (8 → **10**); neither joins the AI
+    Q&A allowlists. jira tools **45 → 47**.
+213. **§4.17 — `get_linked_issues` now carries link identity.** `LinkedIssueRef` gains `linkId`,
+    `linkTypeName` and `direction` ("inward" | "outward"), all derived from the payload the tool
+    **already fetches** — no extra Jira call. `direction` is what lets the Dev-side view tell a
+    canonical link from a reversed one, since Jira only ever returns the *other* side of a link.
+    Required server-side, **optional** in react-app's `LinkedIssue` so no existing consumer or test
+    fixture changed. Also corrected two long-standing doc bugs here: the documented
+    `fields=issuelinks,summary,status` never matched the code (`fields=issuelinks`), and the
+    **"one or none"** claim contradicted already-shipped behaviour (ADR-046 creates 1–2 Dev tasks
+    per PO story) — it was only ever a UI selection heuristic. Fixed in §4.17, §6 and ADR-022.
+214. **§4.9 (new) — `POST /api/ai/draft-po-story`.** The inverse of `plan-dev-tickets`: N Dev tasks
+    in, **one** covering PO story out (`{ assistantMessage, summary, description }`), with
+    acceptance criteria derived from the tasks' real content. Bridge-only REST, never an MCP tool.
+    It deliberately returns **no story points** — the new story's points are the arithmetic *sum* of
+    the selected Dev tickets' points, computed client-side and seeded into an editable field.
+    AI off/unavailable → 503, and the client falls back to a deterministic rollup (`lib/poRollup.ts`)
+    so the flow never blocks.
+215. **§6 — Linking becomes a 3-mode page.** `pages/Linking.tsx` drops from 707 lines to a ~150-line
+    shell (shared sprint context + mode toggle + render switch); each flow is its own component
+    under `components/linking/`. **Mode 1 "Create Dev tasks"** is the original flow, moved verbatim.
+    **Mode 2 "Link existing"** picks a target PO story and links many existing Dev tickets to it
+    (assignee + unlinked-only filters), with an inline two-click **unlink** on every link badge.
+    **Mode 3 "New PO from Dev tasks"** drafts one PO story from N Dev tickets, then creates and
+    links it. The two sprint selects change *meaning* per mode (source vs target) but keep their
+    accessible names, so a11y queries stay stable. Modes 2/3 disable their submit controls behind a
+    single banner for read-only shared-credential users instead of emitting N × 403 log rows.
+216. **Mode 3's create-then-link is retry-safe by construction.** The created PO key is held in a
+    ref and the create step early-returns once it has run, so **"Retry failed" re-links only and can
+    never duplicate the PO story**; a failed create aborts before any link, leaving no orphan. Two
+    dedicated tests pin both halves — the naive single-handler implementation duplicates the story
+    on every retry.
+217. **Shared extractions + drift fix.** New `hooks/useBulkRun.ts` (the sequential write loop +
+    per-row status + retry-only-failures, lifted from mode 1), `components/BulkStatusLog.tsx`,
+    `components/SprintSelect.tsx`, `components/linking/DevTicketPicker.tsx`, `lib/issues.ts`
+    (`flattenIssues`, previously copy-pasted in 5 places) and `lib/poRollup.ts`. Separately, the
+    **`toolCatalog` drift was repaired**: it had 43 jira rows against a 45-tool registry
+    (`get_draft_plan`/`set_draft_plan` were never added) **and** the test's hand-synced
+    `ASK_SERVICE_READ_TOOLS` copy was missing `get_draft_plan` — the two omissions cancelled, so the
+    anti-drift test passed while both were wrong. Catalog is now **52** rows / **47** jira = the
+    registry; the stale 48/43/"reads 19" counts in `USER-GUIDE.md` and the in-app Guide were
+    corrected too.
+218. **Tests**: mcp-jira 661 → **685** (+24: link direction invariant, type-scoped dedupe, reversed
+    flagging, pre-check resilience, self-link/malformed rejection, four unlink-guard paths,
+    `linkId`/`linkTypeName`/`direction` pass-through, bridge round-trip, the `READ_ONLY_USER` 403
+    regression guard, `draft-po-story` 503/400/happy/not-a-tool); react-app 1108 → **1142** (+34:
+    poRollup 7, useBulkRun 4, SprintSelect 3, DevTicketPicker 4, LinkExistingMode 7,
+    NewPoFromDevMode 8, aiDraftPoStory 1); mcp-github 57 unchanged — total 1,826 → **1,884**;
+    smoke 61 → **62** (`draft-po-story` 503 parity; expected jira tools 45 → 47). react-app version
+    pill 1.71.0 → **1.72.0**.

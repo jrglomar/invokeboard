@@ -32,6 +32,9 @@ vi.mock("../src/lib/jiraClient.js", () => ({
   isBlocked: vi.fn(),
   mapIssue: vi.fn(),
   resetClientCache: vi.fn(),
+  // v1.72 (ADR-083): link_dev_to_po / unlink_dev_from_po
+  getLinkedIssues: vi.fn(),
+  deleteIssueLink: vi.fn(),
 }));
 
 import * as jiraClient from "../src/lib/jiraClient.js";
@@ -188,6 +191,36 @@ describe("GET /api/tools", () => {
     expect(names).toContain("list_sprints");
     expect(names).toContain("get_sprint_report");
     expect(names).toContain("get_velocity");
+  });
+
+  it("includes link_dev_to_po and unlink_dev_from_po (v1.72, ADR-083)", async () => {
+    const res = await get("/api/tools");
+    const body = (await res.json()) as { data: { name: string }[] };
+    const names = body.data.map((t) => t.name);
+    expect(names).toContain("link_dev_to_po");
+    expect(names).toContain("unlink_dev_from_po");
+  });
+});
+
+describe("POST /api/tools/link_dev_to_po — happy path (v1.72, ADR-083)", () => {
+  it("returns 200 with ok:true and data through the real bridge", async () => {
+    client.getLinkedIssues.mockResolvedValueOnce([]);
+    client.createIssueLink.mockResolvedValueOnce(undefined);
+
+    const res = await post("/api/tools/link_dev_to_po", {
+      poKey: "PO-1",
+      devKey: "DEV-9",
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      data: { poKey: string; devKey: string; created: boolean; alreadyLinked: boolean };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.poKey).toBe("PO-1");
+    expect(body.data.devKey).toBe("DEV-9");
+    expect(body.data.created).toBe(true);
+    expect(body.data.alreadyLinked).toBe(false);
   });
 });
 

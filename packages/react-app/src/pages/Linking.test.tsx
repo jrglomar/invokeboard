@@ -17,8 +17,16 @@ vi.mock("../hooks/useJira", async (importOriginal) => {
   };
 });
 vi.mock("../lib/boards", () => ({ useBoards: vi.fn() }));
-vi.mock("../lib/linkClient", () => ({ getLinkedIssues: vi.fn(), getIssueDescriptions: vi.fn() }));
-vi.mock("../lib/aiClient", () => ({ getAiStatus: vi.fn(), aiPlanDevTickets: vi.fn() }));
+// v1.72 (ADR-083): linkDevToPo/unlinkDevFromPo (modes 2/3) and aiDraftPoStory (mode 3)
+// must be in these factories too — without them, entering a new mode throws
+// "<fn> is not a function" even though this file's own 10 tests never call them.
+vi.mock("../lib/linkClient", () => ({
+  getLinkedIssues: vi.fn(),
+  getIssueDescriptions: vi.fn(),
+  linkDevToPo: vi.fn(),
+  unlinkDevFromPo: vi.fn(),
+}));
+vi.mock("../lib/aiClient", () => ({ getAiStatus: vi.fn(), aiPlanDevTickets: vi.fn(), aiDraftPoStory: vi.fn() }));
 
 import * as useJiraModule from "../hooks/useJira";
 import * as boardsModule from "../lib/boards";

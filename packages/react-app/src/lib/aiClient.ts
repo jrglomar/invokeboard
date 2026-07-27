@@ -15,6 +15,8 @@ import type {
   SprintSummaryResponse,
   PlanDevTicketsRequest,
   PlanDevTicketsResponse,
+  DraftPoStoryRequest,
+  DraftPoStoryResponse,
   AskRequest,
   AskResponse,
   AskCard,
@@ -162,6 +164,18 @@ export async function aiPlanDevTickets(
   body: PlanDevTicketsRequest
 ): Promise<PlanDevTicketsResponse> {
   return postAi<PlanDevTicketsResponse>("/api/ai/plan-dev-tickets", body);
+}
+
+/**
+ * POST /api/ai/draft-po-story — roll N existing Dev tasks up into ONE PO story draft
+ * (v1.72, ADR-083). Throws McpError. AI_UNAVAILABLE (503) throws
+ * McpError{ code: "AI_UNAVAILABLE" } so the Linking page's "New PO from Dev tasks"
+ * mode can fall back to the deterministic `lib/poRollup.ts` rollup.
+ */
+export async function aiDraftPoStory(
+  body: DraftPoStoryRequest
+): Promise<DraftPoStoryResponse> {
+  return postAi<DraftPoStoryResponse>("/api/ai/draft-po-story", body);
 }
 
 /**

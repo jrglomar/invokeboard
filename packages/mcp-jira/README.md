@@ -12,8 +12,11 @@
 | `get_ticket` | `ticketKey` | Read full ticket fields |
 | `update_ticket` | `ticketKey`, `summary?`, `description?` | Rewrite a ticket description or summary |
 | `get_daily_huddle` | `boardId?` | Generate a deterministic standup digest (no LLM call) |
+| `link_dev_to_po` | `poKey`, `devKey` | Link an EXISTING Dev ticket to an EXISTING PO story (PO depends on Dev) |
+| `unlink_dev_from_po` | `linkId`, `poKey?`, `devKey?` | Remove a PO ↔ Dev issue link by its link id |
 
-See `docs/CONTRACTS.md` §4 for exact input/output types.
+A representative selection — see `docs/CONTRACTS.md` §4 for the full registry (47 tools) and
+exact input/output types.
 
 ## Scripts
 
