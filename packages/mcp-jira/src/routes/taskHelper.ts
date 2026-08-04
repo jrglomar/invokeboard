@@ -16,7 +16,7 @@ import { requireAuth } from "../lib/auth/middleware.js";
 import { isAdmin } from "../lib/auth/adminMiddleware.js";
 import {
   createUser, findUserByEmail, findUserById, updateUser,
-  upsertConnection, deleteConnection,
+  upsertConnection, deleteConnection, findTeamById,
 } from "../lib/userStore.js";
 import { seal, open, maskHint } from "../lib/crypto/secretBox.js";
 import { validateJira, fetchMySprintIssues, fetchIssueDetail, type JiraCreds } from "../lib/userJira.js";
@@ -381,7 +381,10 @@ taskHelperRouter.get("/api/me/context", requireAuth, (_req: Request, res: Respon
   // v1.46: the UI shows a "read-only (shared credentials)" banner and hides Jira-write affordances.
   const readOnly = resolved ? !resolved.canWriteJira : false;
   const sharedFrom = resolved?.sharedFromUserId ? emailOf(resolved.sharedFromUserId) : null;
-  res.json({ ok: true, data: { connections: status, ready, boards, policy, aging, ai, role, readOnly, sharedFrom } });
+  // v1.73 (ADR-084) — the team the user belongs to (if any), so the UI can show/gate team-scoped features.
+  const teamRef = user?.teamId ? findTeamById(user.teamId) : null;
+  const team = teamRef ? { id: teamRef.id, name: teamRef.name } : null;
+  res.json({ ok: true, data: { connections: status, ready, boards, policy, aging, ai, role, readOnly, sharedFrom, team } });
 });
 
 // ── Tasks (§8.5) — fetch my tickets + AI refine→prompt ───────────────────────

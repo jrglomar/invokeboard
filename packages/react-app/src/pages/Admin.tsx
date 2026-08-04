@@ -13,7 +13,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   ShieldCheck, User as UserIcon, Loader2, AlertCircle, CheckCircle2, Settings2, RefreshCw,
-  UserPlus, Trash2, Ban, Undo2, Share2, Layers, Plus,
+  UserPlus, Trash2, Ban, Undo2, Share2, Layers, Plus, Users,
 } from "lucide-react";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -25,7 +25,9 @@ import {
   getAdminUsers, putGlobalConfig, putUserConfig, putUserRole,
   createUser, updateUser, deleteUser,
   getTemplates, createTemplate, deleteTemplate, applyTemplateToUser, applyTemplateToGlobal,
+  listTeams, createTeam, updateTeam, deleteTeam, setUserTeam, adoptIntoTeam,
   type AdminConfig, type AdminUser, type AdminUsersResponse, type ConfigTemplate, type ProviderStatus,
+  type TeamView,
 } from "../lib/adminClient";
 
 // v1.67 (ADR-078) — the three providers eligible for granular sharing, in the fixed order used to
@@ -369,6 +371,161 @@ function TemplatesCard({
   );
 }
 
+// ── Teams (v1.73, ADR-084) ──────────────────────────────────────────────────
+// A team is a SHARED storage scope: every member reads/writes the SAME leaves, retro, meeting
+// notes, PRs, impediments, offset and draft plan, while each keeps their own Jira/GitHub/AI login.
+
+/** Create / list / rename / delete teams, and seed a new team from a member's existing documents. */
+function TeamsCard({
+  teams, users, creating, busy, onCreate, onRename, onDelete, onAdopt,
+}: {
+  teams: TeamView[];
+  /** Every user, for the "Adopt data from…" source picker (any user may have docs worth seeding). */
+  users: AdminUser[];
+  creating: boolean;
+  /** The team currently mid-action (rename/delete/adopt), or null. */
+  busy: string | null;
+  onCreate: (name: string) => void;
+  onRename: (team: TeamView, name: string) => void;
+  onDelete: (team: TeamView) => void;
+  onAdopt: (teamId: string, fromUserId: string) => void;
+}) {
+  const [name, setName] = useState("");
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [adoptFrom, setAdoptFrom] = useState<Record<string, string>>({});
+
+  function submitCreate(e: FormEvent) {
+    e.preventDefault();
+    if (!name.trim()) return;
+    onCreate(name.trim());
+    setName("");
+  }
+
+  function submitRename(t: TeamView) {
+    const next = renameValue.trim();
+    if (next && next !== t.name) onRename(t, next);
+    setRenamingId(null);
+  }
+
+  return (
+    <Card className="shadow-sm">
+      <CardHeader className="px-4 pt-4 pb-2">
+        <h2 className="text-sm font-semibold text-foreground flex items-center gap-1.5">
+          <Users className="h-4 w-4 text-primary" aria-hidden="true" /> Teams
+          {teams.length > 0 && <span className="text-muted-foreground font-normal">({teams.length})</span>}
+        </h2>
+        <p className="text-xs text-muted-foreground">
+          A team is a SHARED scope — every member reads and writes the same leaves, retro, meeting
+          notes, PRs and draft plan, while each still signs in with their own Jira/GitHub/AI account.
+        </p>
+      </CardHeader>
+      <CardContent className="px-4 pb-4 space-y-3">
+        <form onSubmit={submitCreate} className="flex flex-wrap items-end gap-2 pb-3 border-b border-border">
+          <div className="min-w-[220px]">
+            <Label htmlFor="team-name" className="text-xs font-medium">New team name</Label>
+            <Input id="team-name" value={name} onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Platform squad" maxLength={80} />
+          </div>
+          <Button type="submit" size="sm" disabled={creating || !name.trim()}>
+            {creating ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" aria-hidden="true" /> : <Plus className="h-3.5 w-3.5 mr-1.5" aria-hidden="true" />}
+            Create team
+          </Button>
+        </form>
+
+        {teams.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No teams yet.</p>
+        ) : (
+          <ul className="space-y-2">
+            {teams.map((t) => (
+              <li key={t.id} className="border border-border rounded-md px-3 py-2 space-y-1.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  {renamingId === t.id ? (
+                    <>
+                      <Input
+                        aria-label={`Rename team ${t.name}`}
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        className="h-8 max-w-[220px]"
+                        maxLength={80}
+                        autoFocus
+                      />
+                      <Button type="button" size="sm" disabled={busy === t.id} onClick={() => submitRename(t)}>
+                        Save
+                      </Button>
+                      <Button type="button" size="sm" variant="ghost" onClick={() => setRenamingId(null)}>Cancel</Button>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-sm font-medium text-foreground truncate">{t.name}</span>
+                      <span className="text-[0.625rem] font-medium px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground whitespace-nowrap">
+                        {t.memberCount} member{t.memberCount === 1 ? "" : "s"}
+                      </span>
+                      <Button type="button" size="sm" variant="ghost" disabled={busy === t.id}
+                        aria-label={`Rename team ${t.name}`}
+                        onClick={() => { setRenamingId(t.id); setRenameValue(t.name); }}>
+                        Rename
+                      </Button>
+                    </>
+                  )}
+                  <div className="ml-auto flex items-center gap-1.5">
+                    {confirmId === t.id ? (
+                      <>
+                        <Button type="button" size="sm" variant="destructive" disabled={busy === t.id}
+                          onClick={() => { onDelete(t); setConfirmId(null); }}>
+                          Confirm delete
+                        </Button>
+                        <Button type="button" size="sm" variant="ghost" onClick={() => setConfirmId(null)}>Cancel</Button>
+                      </>
+                    ) : (
+                      <Button type="button" size="sm" variant="outline" disabled={busy === t.id}
+                        aria-label={`Delete team ${t.name}`} onClick={() => setConfirmId(t.id)}>
+                        <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                      </Button>
+                    )}
+                  </div>
+                </div>
+                {/* "Members: " prefix keeps this text distinct from the bare email spans elsewhere on
+                    the page (the Users list, other pickers) — a plain email here would otherwise be
+                    ambiguous for anything querying by that user's email address. */}
+                <p className="text-xs text-muted-foreground">
+                  {t.members.length > 0 ? `Members: ${t.members.map((m) => m.email).join(", ")}` : "No members yet."}
+                </p>
+                <div className="flex flex-wrap items-end gap-2 pt-1.5 border-t border-border">
+                  <div className="min-w-[200px]">
+                    <Label htmlFor={`adopt-${t.id}`} className="text-xs font-medium">Adopt data from…</Label>
+                    <select
+                      id={`adopt-${t.id}`}
+                      value={adoptFrom[t.id] ?? ""}
+                      onChange={(e) => setAdoptFrom((prev) => ({ ...prev, [t.id]: e.target.value }))}
+                      className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                    >
+                      <option value="">Choose a user…</option>
+                      {users.map((u) => (
+                        <option key={u.id} value={u.id}>{`Adopt from ${u.email}`}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <Button type="button" size="sm" variant="outline" disabled={busy === t.id || !adoptFrom[t.id]}
+                    onClick={() => { const from = adoptFrom[t.id]; if (from) onAdopt(t.id, from); }}>
+                    {busy === t.id ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" aria-hidden="true" /> : null}
+                    Adopt
+                  </Button>
+                  <p className="text-xs text-muted-foreground basis-full">
+                    One-time seed — copies that user's existing leaves/retro/meeting notes/etc. into this
+                    team. Never overwrites a document the team already has; safe to run more than once.
+                  </p>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 /**
  * v1.67 (ADR-078) — a 3-state connection indicator: OWN (green, as before), INHERITED (amber, "via
  * <email>" — a borrowed token, distinct from a genuinely absent one), or NONE (muted, as before).
@@ -618,13 +775,14 @@ function UserSetupForm({
 // ── One user row ──────────────────────────────────────────────────────────────
 
 function UserRow({
-  user, sources, templates, formEpoch, busy, expanded, confirmingDelete,
+  user, sources, templates, teams, formEpoch, busy, expanded, confirmingDelete,
   onToggleRole, onToggleExpand, onSaveSetup, onSetPassword, onToggleDisabled, onDelete,
-  onRequestDelete, onApplyTemplate,
+  onRequestDelete, onApplyTemplate, onSetTeam,
 }: {
   user: AdminUser;
   sources: AdminUser[];
   templates: ConfigTemplate[];
+  teams: TeamView[];
   formEpoch: number;
   busy: boolean;
   expanded: boolean;
@@ -637,6 +795,7 @@ function UserRow({
   onDelete: (u: AdminUser) => void;
   onRequestDelete: (u: AdminUser | null) => void;
   onApplyTemplate: (userId: string, templateId: string, merge: boolean) => void;
+  onSetTeam: (user: AdminUser, teamId: string | null) => void;
 }) {
   const isAdmin = user.role === "admin";
   const [password, setPassword] = useState("");
@@ -709,6 +868,40 @@ function UserRow({
               </Button>
             </div>
           )}
+
+          {/* Team assignment (v1.73, ADR-084) — a THIRD scope input, separate from Save changes: it
+              takes effect immediately, because it changes what documents this user sees, not a
+              board/env preference. */}
+          <section>
+            <p className="text-[0.6875rem] font-semibold uppercase tracking-wide text-muted-foreground mb-1.5">
+              Team assignment
+            </p>
+            <div className="max-w-xs">
+              <Label htmlFor={`team-${user.id}`} className="text-xs font-medium">Team</Label>
+              <select
+                id={`team-${user.id}`}
+                aria-describedby={`team-warn-${user.id}`}
+                value={user.teamId ?? ""}
+                disabled={busy}
+                onChange={(e) => onSetTeam(user, e.target.value || null)}
+                className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+              >
+                <option value="">No team</option>
+                {teams.map((t) => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+            </div>
+            {/* a11y: tied to the select via aria-describedby — always visible, not a one-off toast,
+                because this is the single most confusing behavior in the whole feature. */}
+            <p id={`team-warn-${user.id}`} className="text-xs text-muted-foreground mt-1.5 max-w-prose">
+              Changing a user's team changes what they SEE, not just who they are. Their leaves, retro
+              notes, meeting notes, PRs and draft plan switch to the team's shared copies — anything they
+              wrote under their own account is kept, but stops being visible to them. To bring a member's
+              existing documents into a team the first time, use <strong className="font-medium text-foreground">Adopt data from…</strong> on
+              that team in the Teams card above.
+            </p>
+          </section>
 
           {/* User setup: access + board/env overrides, saved together in ONE action (v1.52, ADR-063). */}
           <section>
@@ -796,13 +989,16 @@ function UserRow({
 export function Admin() {
   const [data, setData] = useState<AdminUsersResponse | null>(null);
   const [templates, setTemplates] = useState<ConfigTemplate[]>([]);
+  const [teams, setTeams] = useState<TeamView[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [savingGlobal, setSavingGlobal] = useState(false);
   const [creating, setCreating] = useState(false);
   const [creatingTemplate, setCreatingTemplate] = useState(false);
+  const [creatingTeam, setCreatingTeam] = useState(false);
   const [busyTemplateId, setBusyTemplateId] = useState<string | null>(null);
+  const [busyTeamId, setBusyTeamId] = useState<string | null>(null);
   const [busyUserId, setBusyUserId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -812,11 +1008,18 @@ export function Admin() {
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      const [users, tpl] = await Promise.all([getAdminUsers(), getTemplates()]);
+      const [users, tpl, tm] = await Promise.all([getAdminUsers(), getTemplates(), listTeams()]);
       setData(users);
       setTemplates(tpl.templates);
+      setTeams(tm.teams);
     } catch (err) { setError(errMsg(err)); }
     finally { setLoading(false); }
+  }, []);
+
+  // Re-fetch just the team list — used after any action that changes a team's membership
+  // (assigning/clearing a user's team) so member counts/emails stay in sync without a full reload.
+  const refreshTeams = useCallback(async () => {
+    setTeams((await listTeams()).teams);
   }, []);
 
   useEffect(() => { void load(); }, [load]);
@@ -922,6 +1125,56 @@ export function Admin() {
     finally { setSavingGlobal(false); }
   }
 
+  // ── Teams (v1.73, ADR-084) ───────────────────────────────────────────────────
+
+  async function onCreateTeam(name: string) {
+    setCreatingTeam(true); setError(null); setNotice(null);
+    try {
+      const t = await createTeam(name);
+      setTeams((ts) => [...ts, t].sort((a, b) => a.name.localeCompare(b.name)));
+      setNotice(`Team "${t.name}" created.`);
+    } catch (err) { setError(errMsg(err)); }
+    finally { setCreatingTeam(false); }
+  }
+
+  async function onRenameTeam(team: TeamView, name: string) {
+    setBusyTeamId(team.id); setError(null); setNotice(null);
+    try {
+      const t = await updateTeam(team.id, { name });
+      setTeams((ts) => ts.map((x) => (x.id === t.id ? t : x)).sort((a, b) => a.name.localeCompare(b.name)));
+      setNotice(`Team renamed to "${t.name}".`);
+    } catch (err) { setError(errMsg(err)); }
+    finally { setBusyTeamId(null); }
+  }
+
+  async function onDeleteTeam(team: TeamView) {
+    setBusyTeamId(team.id); setError(null); setNotice(null);
+    try {
+      await deleteTeam(team.id);
+      setTeams((ts) => ts.filter((x) => x.id !== team.id));
+      setNotice(`Team "${team.name}" deleted.`);
+    } catch (err) { setError(errMsg(err)); } // surfaces 409 IN_USE verbatim (lists blocking member emails)
+    finally { setBusyTeamId(null); }
+  }
+
+  // One-time, non-destructive seed — copies fromUserId's existing personal docs into the team's scope.
+  async function onAdoptIntoTeam(teamId: string, fromUserId: string) {
+    setBusyTeamId(teamId); setError(null); setNotice(null);
+    try {
+      const result = await adoptIntoTeam(teamId, fromUserId);
+      setNotice(`Copied ${result.copied.length} document(s); skipped ${result.skipped.length} (already present or empty).`);
+    } catch (err) { setError(errMsg(err)); }
+    finally { setBusyTeamId(null); }
+  }
+
+  // Assigning/clearing a user's team is a SCOPE change, not a form field — it takes effect the
+  // moment it's chosen (see the persistent warning next to the selector in UserRow).
+  const setTeamForUser = (user: AdminUser, teamId: string | null) =>
+    withUser(user.id, async () => {
+      replaceUser(await setUserTeam(user.id, teamId));
+      await refreshTeams(); // membership changed → keep each team's member count/emails in sync
+    }, "Team assignment updated.");
+
   // Users who can lend credentials: they own a Jira connection and borrow from nobody.
   const sources = (data?.users ?? []).filter((u) => u.canBeSource);
 
@@ -962,6 +1215,17 @@ export function Admin() {
             onDelete={(t) => void onDeleteTemplate(t)}
           />
 
+          <TeamsCard
+            teams={teams}
+            users={data?.users ?? []}
+            busy={busyTeamId}
+            creating={creatingTeam}
+            onCreate={(name) => void onCreateTeam(name)}
+            onRename={(t, name) => void onRenameTeam(t, name)}
+            onDelete={(t) => void onDeleteTeam(t)}
+            onAdopt={(teamId, fromUserId) => void onAdoptIntoTeam(teamId, fromUserId)}
+          />
+
           <Card className="shadow-sm">
             <CardHeader className="px-4 pt-4 pb-2">
               <h2 className="text-sm font-semibold text-foreground">
@@ -976,6 +1240,7 @@ export function Admin() {
                     user={u}
                     sources={sources}
                     templates={templates}
+                    teams={teams}
                     formEpoch={formEpoch}
                     busy={busyUserId === u.id}
                     expanded={expandedId === u.id}
@@ -988,6 +1253,7 @@ export function Admin() {
                     onDelete={removeUser}
                     onRequestDelete={(target) => setDeletingId(target ? target.id : null)}
                     onApplyTemplate={applyToUser}
+                    onSetTeam={setTeamForUser}
                   />
                 ))
               ) : (

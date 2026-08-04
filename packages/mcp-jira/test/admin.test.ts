@@ -8,8 +8,9 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { resetConfigCache, USER_STORES_DIR } from "../src/lib/config.js";
-import { upsertConnection, findUserByEmail } from "../src/lib/userStore.js";
+import { upsertConnection, findUserByEmail, teamScope } from "../src/lib/userStore.js";
 import { seal } from "../src/lib/crypto/secretBox.js";
+import { TEAM_SCOPED_STORE_NAMES } from "../src/lib/storage/registry.js";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "invokeboard-admin-"));
 const storeFile = path.join(dir, "users.json");
@@ -501,5 +502,189 @@ describe("Personal sprint journal API (v1.47, ADR-057)", () => {
   it("404s patching a to-do that doesn't exist", async () => {
     const r = await req("PATCH", "/api/me/journal/todos/nope", { done: true }, cookie);
     expect(r.status).toBe(404);
+  });
+});
+
+// ── v1.73 (ADR-084): Teams — shared team scope admin CRUD ──────────────────────
+//
+// `adoptScopeDocs` (called by POST /api/admin/teams/:id/adopt) reads/writes through the REAL
+// json storage driver, whose per-scope path is `<USER_STORES_DIR>/<scope>/*.json` —
+// USER_STORES_DIR is a package-relative constant, NOT overridable by TASK_HELPER_FILE (that env
+// var only relocates the shared `users` doc). Any scope this block's adopt tests touch is
+// tracked in `touchedScopes` and wiped in `afterAll`, mirroring journal.test.ts/teams.test.ts.
+describe("Teams (v1.73, ADR-084)", () => {
+  let adminCookie: string;
+  let plainCookie: string;
+  let teamAId: string;
+  let teamBId: string;
+  let memberId: string;
+  let memberEmail: string;
+  const touchedScopes: string[] = [];
+
+  beforeAll(async () => {
+    adminCookie = (await req("POST", "/api/auth/login", { email: "boss@team.com", password: "password123" })).cookie!;
+    const created = await req("POST", "/api/admin/users", { email: "teamie@team.com", password: "password123" }, adminCookie);
+    memberId = created.json.data.id;
+    memberEmail = created.json.data.email;
+    touchedScopes.push(memberId); // the adopt test's source scope is this user's raw id
+    plainCookie = (await req("POST", "/api/auth/login", { email: "teamie@team.com", password: "password123" })).cookie!;
+  });
+
+  afterAll(() => {
+    for (const scope of touchedScopes) {
+      try { fs.rmSync(path.join(USER_STORES_DIR, scope), { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
+
+  it("creates a team (201, memberCount 0)", async () => {
+    const r = await req("POST", "/api/admin/teams", { name: "Team Falcon" }, adminCookie);
+    expect(r.status).toBe(201);
+    expect(r.json.data.name).toBe("Team Falcon");
+    expect(r.json.data.memberCount).toBe(0);
+    expect(r.json.data.members).toEqual([]);
+    teamAId = r.json.data.id;
+  });
+
+  it("rejects a duplicate name (409 NAME_TAKEN), case-insensitively", async () => {
+    const exact = await req("POST", "/api/admin/teams", { name: "Team Falcon" }, adminCookie);
+    expect(exact.status).toBe(409);
+    expect(exact.json.error.code).toBe("NAME_TAKEN");
+
+    const caseDiff = await req("POST", "/api/admin/teams", { name: "TEAM FALCON" }, adminCookie);
+    expect(caseDiff.status).toBe(409);
+    expect(caseDiff.json.error.code).toBe("NAME_TAKEN");
+  });
+
+  it("rejects an invalid body with 400 VALIDATION", async () => {
+    const missingName = await req("POST", "/api/admin/teams", { config: {} }, adminCookie);
+    expect(missingName.status).toBe(400);
+    expect(missingName.json.error.code).toBe("VALIDATION");
+
+    const tooLong = await req("POST", "/api/admin/teams", { name: "x".repeat(81) }, adminCookie);
+    expect(tooLong.status).toBe(400);
+    expect(tooLong.json.error.code).toBe("VALIDATION");
+  });
+
+  it("lists teams, including the created one", async () => {
+    const r = await req("GET", "/api/admin/teams", undefined, adminCookie);
+    expect(r.status).toBe(200);
+    expect(r.json.data.teams.map((t: { id: string }) => t.id)).toContain(teamAId);
+  });
+
+  it("renames a team", async () => {
+    const r = await req("PUT", `/api/admin/teams/${teamAId}`, { name: "Team Falcon Renamed" }, adminCookie);
+    expect(r.status).toBe(200);
+    expect(r.json.data.name).toBe("Team Falcon Renamed");
+  });
+
+  it("404s a PUT to an unknown team id", async () => {
+    const r = await req("PUT", "/api/admin/teams/nope", { name: "X" }, adminCookie);
+    expect(r.status).toBe(404);
+    expect(r.json.error.code).toBe("NOT_FOUND");
+  });
+
+  it("409s renaming a team onto another team's name", async () => {
+    const other = await req("POST", "/api/admin/teams", { name: "Team Beta" }, adminCookie);
+    teamBId = other.json.data.id;
+    const r = await req("PUT", `/api/admin/teams/${teamAId}`, { name: "Team Beta" }, adminCookie);
+    expect(r.status).toBe(409);
+    expect(r.json.error.code).toBe("NAME_TAKEN");
+  });
+
+  it("assigns a user to the team, reflected in userView and the team's memberCount/members", async () => {
+    const r = await req("PUT", `/api/admin/users/${memberId}/team`, { teamId: teamAId }, adminCookie);
+    expect(r.status).toBe(200);
+    expect(r.json.data.teamId).toBe(teamAId);
+    expect(r.json.data.teamName).toBe("Team Falcon Renamed");
+
+    const teams = await req("GET", "/api/admin/teams", undefined, adminCookie);
+    const teamA = teams.json.data.teams.find((t: { id: string }) => t.id === teamAId);
+    expect(teamA.memberCount).toBe(1);
+    expect(teamA.members).toEqual([{ id: memberId, email: memberEmail }]);
+  });
+
+  it("404s assigning a user to an unknown team id", async () => {
+    const r = await req("PUT", `/api/admin/users/${memberId}/team`, { teamId: "nope" }, adminCookie);
+    expect(r.status).toBe(404);
+    expect(r.json.error.code).toBe("NOT_FOUND");
+  });
+
+  it("404s assigning an unknown user id to a team", async () => {
+    const r = await req("PUT", "/api/admin/users/nope/team", { teamId: teamAId }, adminCookie);
+    expect(r.status).toBe(404);
+    expect(r.json.error.code).toBe("NOT_FOUND");
+  });
+
+  it("clears the assignment with teamId: null", async () => {
+    const r = await req("PUT", `/api/admin/users/${memberId}/team`, { teamId: null }, adminCookie);
+    expect(r.status).toBe(200);
+    expect(r.json.data.teamId).toBeNull();
+    expect(r.json.data.teamName).toBeNull();
+  });
+
+  it("409s deleting a team with a member, then deletes cleanly after clearing", async () => {
+    await req("PUT", `/api/admin/users/${memberId}/team`, { teamId: teamAId }, adminCookie);
+    const blocked = await req("DELETE", `/api/admin/teams/${teamAId}`, undefined, adminCookie);
+    expect(blocked.status).toBe(409);
+    expect(blocked.json.error.code).toBe("IN_USE");
+
+    await req("PUT", `/api/admin/users/${memberId}/team`, { teamId: null }, adminCookie);
+    const ok = await req("DELETE", `/api/admin/teams/${teamAId}`, undefined, adminCookie);
+    expect(ok.status).toBe(200);
+    expect(ok.json.data).toEqual({ deleted: true });
+
+    expect((await req("DELETE", `/api/admin/teams/${teamBId}`, undefined, adminCookie)).status).toBe(200);
+  });
+
+  it("404s adopt for an unknown team id or an unknown fromUserId", async () => {
+    const adoptTeam = await req("POST", "/api/admin/teams", { name: "Adopt Guard Team" }, adminCookie);
+    const adoptTeamId = adoptTeam.json.data.id;
+    touchedScopes.push(teamScope(adoptTeamId));
+
+    const unknownTeam = await req("POST", "/api/admin/teams/nope/adopt", { fromUserId: memberId }, adminCookie);
+    expect(unknownTeam.status).toBe(404);
+    expect(unknownTeam.json.error.code).toBe("NOT_FOUND");
+
+    const unknownUser = await req("POST", `/api/admin/teams/${adoptTeamId}/adopt`, { fromUserId: "nope" }, adminCookie);
+    expect(unknownUser.status).toBe(404);
+    expect(unknownUser.json.error.code).toBe("NOT_FOUND");
+
+    await req("DELETE", `/api/admin/teams/${adoptTeamId}`, undefined, adminCookie);
+  });
+
+  it("adopts a source user's docs into the team scope (200, copied/skipped arrays)", async () => {
+    const adoptTeam = await req("POST", "/api/admin/teams", { name: "Adopt Team" }, adminCookie);
+    const adoptTeamId = adoptTeam.json.data.id;
+    touchedScopes.push(teamScope(adoptTeamId));
+
+    const r = await req("POST", `/api/admin/teams/${adoptTeamId}/adopt`, { fromUserId: memberId }, adminCookie);
+    expect(r.status).toBe(200);
+    expect(Array.isArray(r.json.data.copied)).toBe(true);
+    expect(Array.isArray(r.json.data.skipped)).toBe(true);
+    // teamie@team.com has no personal docs, so this legitimately reports everything as skipped —
+    // the invariant under test is that every known store name is accounted for exactly once.
+    expect(r.json.data.copied.length + r.json.data.skipped.length).toBe(TEAM_SCOPED_STORE_NAMES.length);
+
+    await req("DELETE", `/api/admin/teams/${adoptTeamId}`, undefined, adminCookie);
+  });
+
+  it("rejects every teams route for a non-admin (403 FORBIDDEN) and a missing session (401 UNAUTHENTICATED)", async () => {
+    const routes: Array<[string, string, unknown?]> = [
+      ["GET", "/api/admin/teams", undefined],
+      ["POST", "/api/admin/teams", { name: "Route Guard Team" }],
+      ["PUT", `/api/admin/teams/${teamBId}`, { name: "Route Guard Renamed" }],
+      ["DELETE", `/api/admin/teams/${teamBId}`, undefined],
+      ["PUT", `/api/admin/users/${memberId}/team`, { teamId: null }],
+      ["POST", `/api/admin/teams/${teamBId}/adopt`, { fromUserId: memberId }],
+    ];
+    for (const [method, url, body] of routes) {
+      const forbidden = await req(method, url, body, plainCookie);
+      expect(forbidden.status).toBe(403);
+      expect(forbidden.json.error.code).toBe("FORBIDDEN");
+
+      const unauth = await req(method, url, body);
+      expect(unauth.status).toBe(401);
+      expect(unauth.json.error.code).toBe("UNAUTHENTICATED");
+    }
   });
 });

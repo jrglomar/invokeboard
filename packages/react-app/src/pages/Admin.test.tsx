@@ -19,6 +19,13 @@ vi.mock("../lib/adminClient", () => ({
   deleteTemplate: vi.fn(),
   applyTemplateToUser: vi.fn(),
   applyTemplateToGlobal: vi.fn(),
+  // v1.73 (ADR-084) — Teams
+  listTeams: vi.fn(),
+  createTeam: vi.fn(),
+  updateTeam: vi.fn(),
+  deleteTeam: vi.fn(),
+  setUserTeam: vi.fn(),
+  adoptIntoTeam: vi.fn(),
 }));
 
 import * as adminClient from "../lib/adminClient";
@@ -26,7 +33,8 @@ import * as adminClient from "../lib/adminClient";
 const api = adminClient as unknown as Record<
   | "getAdminUsers" | "putGlobalConfig" | "putUserConfig" | "putUserRole"
   | "createUser" | "updateUser" | "deleteUser"
-  | "getTemplates" | "createTemplate" | "deleteTemplate" | "applyTemplateToUser" | "applyTemplateToGlobal",
+  | "getTemplates" | "createTemplate" | "deleteTemplate" | "applyTemplateToUser" | "applyTemplateToGlobal"
+  | "listTeams" | "createTeam" | "updateTeam" | "deleteTeam" | "setUserTeam" | "adoptIntoTeam",
   ReturnType<typeof vi.fn>
 >;
 
@@ -34,6 +42,13 @@ const TEMPLATE = {
   id: "t1", name: "Team A — Dev",
   config: { JIRA_DEV_BOARD_ID: "1038", JIRA_VELOCITY_SPRINTS: 6 },
   createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+};
+
+// v1.73 (ADR-084) — Teams: a shared storage scope, distinct from the config templates above.
+const TEAM = {
+  id: "team1", name: "Platform squad", config: {},
+  createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+  memberCount: 1, members: [{ id: "u2", email: "dev@team.com" }],
 };
 
 const boss = {
@@ -44,6 +59,8 @@ const boss = {
   sharedProviders: null,
   credentialSourceUserId: null, sharedFrom: null, allowWrites: false, disabled: false,
   readOnly: false, canBeSource: true,
+  // v1.73 (ADR-084) — unassigned by default.
+  teamId: null, teamName: null,
 };
 const dev = {
   id: "u2", email: "dev@team.com", role: "user" as const, bootstrapAdmin: false,
@@ -53,6 +70,7 @@ const dev = {
   sharedProviders: null,
   credentialSourceUserId: null, sharedFrom: null, allowWrites: false, disabled: false,
   readOnly: false, canBeSource: false,
+  teamId: null, teamName: null,
 };
 const viewer = {
   id: "u3", email: "viewer@team.com", role: "user" as const, bootstrapAdmin: false,
@@ -64,6 +82,7 @@ const viewer = {
     ai: { status: "none" },
   },
   sharedProviders: null,
+  teamId: null, teamName: null,
   credentialSourceUserId: "u1", sharedFrom: "boss@team.com", allowWrites: false, disabled: false,
   readOnly: true, canBeSource: false,
 };
@@ -86,6 +105,19 @@ beforeEach(() => {
   api.deleteTemplate.mockResolvedValue({ deleted: true });
   api.applyTemplateToUser.mockImplementation((id: string) => Promise.resolve({ ...dev, id, config: TEMPLATE.config }));
   api.applyTemplateToGlobal.mockResolvedValue({ globalConfig: TEMPLATE.config });
+  // v1.73 (ADR-084) — Teams
+  api.listTeams.mockResolvedValue({ teams: [TEAM] });
+  api.createTeam.mockImplementation((name: string) =>
+    Promise.resolve({ id: "team2", name, config: {}, createdAt: "2026-02-01T00:00:00Z", updatedAt: "2026-02-01T00:00:00Z", memberCount: 0, members: [] })
+  );
+  api.updateTeam.mockImplementation((id: string, patch: Record<string, unknown>) =>
+    Promise.resolve({ ...TEAM, id, ...patch })
+  );
+  api.deleteTeam.mockResolvedValue({ deleted: true });
+  api.setUserTeam.mockImplementation((id: string, teamId: string | null) =>
+    Promise.resolve({ ...dev, id, teamId, teamName: teamId ? TEAM.name : null })
+  );
+  api.adoptIntoTeam.mockResolvedValue({ copied: ["leaves", "retro"], skipped: ["team", "impediments"] });
 });
 afterEach(() => cleanup());
 
@@ -428,5 +460,77 @@ describe("Admin config templates (v1.47)", () => {
 
     await waitFor(() => expect(api.applyTemplateToUser).toHaveBeenCalledWith("u2", "t1", false));
     expect(api.applyTemplateToGlobal).not.toHaveBeenCalled();
+  });
+});
+
+describe("Admin teams — shared storage scope (v1.73, ADR-084)", () => {
+  it("renders the Teams card with a team's name, member count, and member emails", async () => {
+    render(<Admin />);
+    await waitFor(() => screen.getByText("Platform squad"));
+    expect(screen.getByText("1 member")).toBeTruthy();
+    expect(screen.getByText("Members: dev@team.com")).toBeTruthy();
+  });
+
+  it("creates a team from the name field", async () => {
+    render(<Admin />);
+    await waitFor(() => screen.getByText("Platform squad"));
+    fireEvent.change(screen.getByLabelText("New team name"), { target: { value: "Growth squad" } });
+    fireEvent.click(screen.getByRole("button", { name: /create team/i }));
+    await waitFor(() => expect(api.createTeam).toHaveBeenCalledWith("Growth squad"));
+  });
+
+  it("surfaces a 409 NAME_TAKEN error when creating a team with a duplicate name", async () => {
+    api.createTeam.mockRejectedValueOnce({ code: "NAME_TAKEN", message: "A team with that name already exists" });
+    render(<Admin />);
+    await waitFor(() => screen.getByText("Platform squad"));
+    fireEvent.change(screen.getByLabelText("New team name"), { target: { value: "Platform squad" } });
+    fireEvent.click(screen.getByRole("button", { name: /create team/i }));
+    await waitFor(() => expect(screen.getByText("A team with that name already exists")).toBeTruthy());
+  });
+
+  it("assigns a user to a team via the team selector, reflecting the user's current teamId", async () => {
+    render(<Admin />);
+    await waitFor(() => screen.getByText("dev@team.com"));
+    openManage(1);
+    const select = (await waitFor(() => screen.getByLabelText("Team"))) as HTMLSelectElement;
+    expect(select.value).toBe(""); // dev.teamId is null -> "No team"
+    fireEvent.change(select, { target: { value: "team1" } });
+    await waitFor(() => expect(api.setUserTeam).toHaveBeenCalledWith("u2", "team1"));
+  });
+
+  it("ties a persistent scope-change warning to the team selector via aria-describedby", async () => {
+    render(<Admin />);
+    await waitFor(() => screen.getByText("dev@team.com"));
+    openManage(1);
+    const select = (await waitFor(() => screen.getByLabelText("Team"))) as HTMLSelectElement;
+    const describedBy = select.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    expect(document.getElementById(describedBy as string)?.textContent).toMatch(/changes what they SEE/i);
+  });
+
+  it("surfaces the 409 IN_USE message verbatim when deleting a team with members", async () => {
+    api.deleteTeam.mockRejectedValueOnce({
+      code: "IN_USE",
+      message: "1 user(s) belong to this team (dev@team.com). Reassign them first.",
+    });
+    render(<Admin />);
+    await waitFor(() => screen.getByText("Platform squad"));
+    fireEvent.click(screen.getByRole("button", { name: /delete team platform squad/i }));
+    expect(api.deleteTeam).not.toHaveBeenCalled(); // first click only arms the confirm
+    fireEvent.click(screen.getByRole("button", { name: /confirm delete/i }));
+    await waitFor(() =>
+      expect(screen.getByText("1 user(s) belong to this team (dev@team.com). Reassign them first.")).toBeTruthy()
+    );
+  });
+
+  it("renders a summarising notice after adopting a user's data into a team", async () => {
+    render(<Admin />);
+    await waitFor(() => screen.getByText("Platform squad"));
+    fireEvent.change(screen.getByLabelText("Adopt data from…"), { target: { value: "u1" } });
+    fireEvent.click(screen.getByRole("button", { name: /^adopt$/i }));
+    await waitFor(() => expect(api.adoptIntoTeam).toHaveBeenCalledWith("team1", "u1"));
+    await waitFor(() =>
+      expect(screen.getByText("Copied 2 document(s); skipped 2 (already present or empty).")).toBeTruthy()
+    );
   });
 });

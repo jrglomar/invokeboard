@@ -1,13 +1,18 @@
 /**
- * Per-user config resolution (v1.45/v1.46, ADR-055/056). Builds a full `Config` for a signed-in
- * user by merging, later-wins:
+ * Per-user config resolution (v1.45/v1.46/v1.73, ADR-055/056/084). Builds a full `Config` for a
+ * signed-in user by merging, later-wins:
  *
- *   .env base  ←  admin GLOBAL defaults  ←  credential source's overrides  ←  the user's own
- *   overrides  ←  the effective Jira credentials  ←  the effective AI credentials
+ *   .env base  ←  admin GLOBAL defaults  ←  team config  ←  credential source's overrides  ←
+ *   the user's own overrides  ←  the effective Jira credentials  ←  the effective AI credentials
  *
  * "Effective" means: the user's own connection if they have one, otherwise the connection borrowed
  * from their credential source (ADR-056). A borrower also reads the source's local team stores and
  * is read-only against Jira unless an admin granted `allowWrites`.
+ *
+ * v1.73 (ADR-084): a user's `teamId`, when it resolves to a live team, WINS for storage scope over
+ * `sharedFrom ?? userId` — every member of the same team reads/writes the same shared documents.
+ * Team scope is orthogonal to credential delegation: `sharedFrom` still decides which Jira/GitHub/AI
+ * credentials are in play, independent of team membership.
  *
  * Called by the bridge middleware BEFORE entering the request context, so `getConfig()` here
  * returns the global `.env` base (no ALS context active yet).
@@ -15,7 +20,7 @@
 
 import type { Config } from "./config.js";
 import { getConfig } from "./config.js";
-import { findUserById, getGlobalConfig, getUserConfig } from "./userStore.js";
+import { findUserById, findTeamById, teamScope, getGlobalConfig, getUserConfig } from "./userStore.js";
 import { getEffectiveConnection, canUserWriteJira, type EffectiveConnection } from "./delegation.js";
 import { open } from "./crypto/secretBox.js";
 
@@ -43,12 +48,15 @@ export function resolveUser(userId: string): ResolvedUser | null {
 
   const base = getConfig(); // global .env base (not yet inside a user request context)
   const sharedFrom = jira.viaUserId; // null when the user owns the Jira connection
-  const storeUserId = sharedFrom ?? userId;
+  // v1.73 (ADR-084): a teamId pointing at a deleted team behaves as "no team" — never throws.
+  const team = user.teamId ? findTeamById(user.teamId) : null;
+  const storeUserId = team ? teamScope(team.id) : (sharedFrom ?? userId);
   const token = open(jira.conn.enc); // decrypt in-memory only
 
   const config: Config = {
     ...base,
     ...getGlobalConfig(), // admin global defaults
+    ...(team ? team.config : {}), // v1.73 (ADR-084) — team-level board/env defaults
     ...(sharedFrom ? getUserConfig(sharedFrom) : {}), // inherit the credential owner's overrides
     ...getUserConfig(userId), // the user's own admin-set overrides win
     JIRA_BASE_URL: jira.conn.meta["baseUrl"] || base.JIRA_BASE_URL,

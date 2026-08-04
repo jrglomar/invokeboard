@@ -19,6 +19,8 @@ interface AuthState {
   readOnly: boolean;
   /** v1.46 — email of the user whose credentials are borrowed, else null. */
   sharedFrom: string | null;
+  /** v1.73 (ADR-084) — the shared team the user belongs to (storage scope), or null. */
+  team: { id: string; name: string } | null;
   /** The user's resolved context (connections, boards) — null until loaded. */
   context: MyContext | null;
   refresh: () => Promise<void>;
@@ -87,6 +89,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         role: context?.role ?? user?.role ?? "user",
         readOnly: context?.readOnly ?? false,
         sharedFrom: context?.sharedFrom ?? null,
+        team: context?.team ?? null,
         context,
         refresh, refreshContext, login, signup, logout,
       }}

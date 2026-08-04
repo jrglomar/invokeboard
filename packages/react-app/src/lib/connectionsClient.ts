@@ -57,6 +57,8 @@ export interface MyContext {
   readOnly?: boolean;
   /** v1.46 — the email of the user whose credentials are being borrowed, else null. */
   sharedFrom?: string | null;
+  /** v1.73 (ADR-084) — the shared team this user belongs to (storage SCOPE), or null when unassigned. */
+  team?: { id: string; name: string } | null;
 }
 
 export function getConnections(): Promise<ConnectionsStatus> {

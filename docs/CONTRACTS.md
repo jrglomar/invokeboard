@@ -2200,6 +2200,114 @@ create, field-count, two-step delete, and scoped apply (a user's picker never to
 
 ---
 
+## 9.10 Teams — shared team scope (v1.73, ADR-084)
+
+A **Team** is a first-class storage scope: every app user assigned to the same team reads and writes the
+SAME shared documents (leaves, meeting notes, meeting goals, PRs, retro, impediments, offset, team, draft
+plan) — while each member still authenticates with their OWN Jira/GitHub/AI credentials. Team scope and
+ADR-056 credential delegation are orthogonal: a member can be on a shared token AND in a team, and the two
+resolve independently (credentials from `sharedFrom`, storage from the team).
+
+### 9.10.1 Model
+
+```ts
+interface Team {
+  id: string;
+  name: string;
+  config: AdminConfig; // team-level board/env defaults — see merge order below
+  createdAt: string;
+  updatedAt: string;
+}
+```
+
+`StoredUser` gains `teamId?: string | null` — the team the user belongs to, or none/absent. `teams:
+Record<string, Team>` lives in the SAME `users` doc alongside `configTemplates` — the proven §9.9 pattern:
+no new store registry entry, no new env var, and a team plus its members' `teamId` stay atomically
+consistent with the rest of the account data (one read/write, not two stores that can drift apart).
+
+### 9.10.2 Scope rule
+
+`resolveUser(userId)` (userConfig.ts) computes:
+
+```
+storeUserId = team ? `team-${team.id}` : (sharedFrom ?? userId)
+```
+
+Team **wins for SCOPE**; delegation still governs **CREDENTIALS** — `sharedFrom` (ADR-056) is unaffected by
+team membership. A `teamId` that points at a DELETED team is treated as "no team" (falls back to the
+ADR-056 `sharedFrom ?? userId` rule) — defensively, never a crash.
+
+`teamScope(teamId)` returns `` `team-${teamId}` ``. The `team-` prefix keeps the scope string
+filesystem-safe — it becomes a directory name under the json driver's per-scope path formula
+(`<userStoresDir>/<scope>/<name>.json`, §9.1) — and is collision-free with any `crypto.randomUUID()` id,
+none of which begin with `team-`.
+
+### 9.10.3 Config merge order (extends §9.2)
+
+```
+.env base ← admin global defaults ← team config ← credential source's overrides ←
+the user's own overrides ← effective Jira creds ← effective AI creds
+```
+
+Team config sits between the admin global defaults and the delegation/per-user overrides — a per-user
+override still wins over the team's config, and the team's config still wins over the global default. This
+layer is load-bearing: without it, two members of the same team pointed at different `JIRA_DEV_BOARD_ID`s
+would share the SAME leaves/retro/meeting-notes documents while viewing different sprints — exactly the
+inconsistency a shared scope must not produce.
+
+### 9.10.4 Invariants
+
+- `users` (the account list itself) stays `SHARED_SCOPE` always — teams live INSIDE it, they never
+  fragment it into per-team stores.
+- `journal` stays keyed by the REAL user id always — personal notes are never team-shared, regardless of
+  team membership (mirrors the existing ADR-056 carve-out for delegation).
+- `TEAM_SCOPED_STORE_NAMES` (storage/registry.ts) — the doc names a team shares: exactly
+  `SHARED_STORE_NAMES` minus `"users"` — `leaves`, `team`, `impediments`, `prs`, `post-scrum`,
+  `meeting-goal`, `meeting-notes`, `retro`, `offset`, `draft-plan`.
+- Adding team scoping required ZERO changes to any of the 47 tools — scope resolution is centralized in
+  `currentScope()` (storage/index.ts), which already reads `getRequestStoreUserId()`; a team's
+  `storeUserId` flows through the exact same AsyncLocalStorage plumbing ADR-056 built.
+
+### 9.10.5 Adoption (one-time seeding)
+
+`adoptScopeDocs(fromScope, toScope, names)` (storage/adopt.ts) copies a user's existing personal documents
+into a team's shared scope — e.g. seeding a new team from its first member's existing leaves/retro/etc.
+Non-destructive: a doc absent at the source, or already present at the target, is skipped, never
+overwritten; running it twice reports everything `skipped`.
+
+```ts
+interface AdoptResult { copied: string[]; skipped: string[] }
+function adoptScopeDocs(fromScope: string, toScope: string, names: readonly string[]): AdoptResult
+```
+
+### 9.10.6 Admin REST routes (Wave 2 — documented now, not yet implemented)
+
+All require an admin session. No NEW error codes — reuses `NAME_TAKEN` / `IN_USE` / `NOT_FOUND` /
+`VALIDATION` (§9.6/§9.8/§9.9 conventions).
+
+```
+GET    /api/admin/teams              -> { teams: TeamView[] }
+POST   /api/admin/teams              -> 201 TeamView            // 409 NAME_TAKEN
+PUT    /api/admin/teams/:id          -> TeamView                // 404 NOT_FOUND, 409 NAME_TAKEN
+DELETE /api/admin/teams/:id          -> { deleted: true }       // 409 IN_USE when members remain
+PUT    /api/admin/users/:id/team     -> userView                // body { teamId: string | null }
+POST   /api/admin/teams/:id/adopt    -> { copied[], skipped[] } // body { fromUserId }
+```
+
+`GET /api/me/context` (§9.5) gains `team: { id, name } | null`.
+
+### 9.10.7 Quality
+
+Keyless/offline: team CRUD round-trip; case-insensitive name lookup; `updateTeam` bumps `updatedAt`;
+`teamScope` formula; `listUsersByTeam`; `teamId: null` clears the field; a legacy `users` doc with no
+`teams` key reads back as `{}`; `resolveUser` scopes to the team for a member with their own Jira
+connection; `resolveUser` falls back to `sharedFrom ?? userId` when `teamId` points at a deleted team; team
+config lands in the merge with a per-user override still winning; two same-team members resolve to the
+identical `storeUserId`; two different teams stay isolated from each other; a team member's journal still
+resolves to their own real user id; `adoptScopeDocs` copy/skip/non-destructive/idempotent behavior.
+
+---
+
 ## 10. UI surfaces (v1.47, ADR-057)
 
 **Connections** is its own tab (`pages/Connections.tsx`) — the Task Helper no longer embeds the
