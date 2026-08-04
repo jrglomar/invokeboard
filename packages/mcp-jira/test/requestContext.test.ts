@@ -8,9 +8,11 @@ import * as path from "path";
 import {
   getConfig, resetConfigCache, getLeavesFilePath, getRetroFilePath, USER_STORES_DIR,
 } from "../src/lib/config.js";
-import { runWithUser } from "../src/lib/requestContext.js";
-import { resolveUserConfig } from "../src/lib/userConfig.js";
-import { createUser, upsertConnection, setGlobalConfig, setUserConfig } from "../src/lib/userStore.js";
+import { runWithUser, getRequestUserId, getRequestStoreUserId } from "../src/lib/requestContext.js";
+import { resolveUserConfig, resolveUser } from "../src/lib/userConfig.js";
+import {
+  createUser, upsertConnection, setGlobalConfig, setUserConfig, createTeam, updateUser, teamScope,
+} from "../src/lib/userStore.js";
 import { seal } from "../src/lib/crypto/secretBox.js";
 
 let dir: string;
@@ -110,5 +112,74 @@ describe("request context (ADR-055)", () => {
     // the user's own connection still wins for base/email/token
     expect(cfg!.JIRA_API_TOKEN).toBe("bob-jira-token");
     expect(cfg!.JIRA_BASE_URL).toBe("https://bob.atlassian.net");
+  });
+});
+
+describe("team scoping inside the request context (v1.73, ADR-084)", () => {
+  function connectJira(userId: string): void {
+    upsertConnection(userId, "jira", {
+      enc: seal(`token-for-${userId}`),
+      meta: { baseUrl: "https://team.atlassian.net", email: `${userId}@team.com`, hint: "…oken" },
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  it("two users in the SAME team resolve to the SAME storeUserId (and therefore the same store paths)", () => {
+    const team = createTeam("Team Falcon");
+    const alice = createUser("alice@falcon.com", "hash");
+    const bob = createUser("bob@falcon.com", "hash");
+    connectJira(alice.id);
+    connectJira(bob.id);
+    updateUser(alice.id, { teamId: team.id });
+    updateUser(bob.id, { teamId: team.id });
+
+    const rAlice = resolveUser(alice.id)!;
+    const rBob = resolveUser(bob.id)!;
+    expect(rAlice.storeUserId).toBe(teamScope(team.id));
+    expect(rAlice.storeUserId).toBe(rBob.storeUserId);
+
+    let aliceLeavesPath = "";
+    let bobLeavesPath = "";
+    runWithUser({ userId: alice.id, config: rAlice.config, storeUserId: rAlice.storeUserId }, () => {
+      aliceLeavesPath = getLeavesFilePath();
+    });
+    runWithUser({ userId: bob.id, config: rBob.config, storeUserId: rBob.storeUserId }, () => {
+      bobLeavesPath = getLeavesFilePath();
+    });
+    expect(aliceLeavesPath).toBe(bobLeavesPath);
+    expect(aliceLeavesPath).toContain(path.join(teamScope(team.id), "leaves.json"));
+  });
+
+  it("two DIFFERENT teams are isolated from each other", () => {
+    const teamA = createTeam("Team A");
+    const teamB = createTeam("Team B");
+    const alice = createUser("alice@a.com", "hash");
+    const carl = createUser("carl@b.com", "hash");
+    connectJira(alice.id);
+    connectJira(carl.id);
+    updateUser(alice.id, { teamId: teamA.id });
+    updateUser(carl.id, { teamId: teamB.id });
+
+    const rAlice = resolveUser(alice.id)!;
+    const rCarl = resolveUser(carl.id)!;
+    expect(rAlice.storeUserId).not.toBe(rCarl.storeUserId);
+    expect(rAlice.storeUserId).toBe(teamScope(teamA.id));
+    expect(rCarl.storeUserId).toBe(teamScope(teamB.id));
+  });
+
+  it("a team member's journal still resolves to their own real userId inside runWithUser", () => {
+    const team = createTeam("Team Falcon");
+    const dana = createUser("dana@falcon.com", "hash");
+    connectJira(dana.id);
+    updateUser(dana.id, { teamId: team.id });
+
+    const r = resolveUser(dana.id)!;
+    expect(r.storeUserId).toBe(teamScope(team.id)); // shared team scope for storage
+    runWithUser({ userId: dana.id, config: r.config, storeUserId: r.storeUserId }, () => {
+      // journalStore.ts takes userId explicitly — getRequestUserId() (the REAL identity),
+      // never getRequestStoreUserId() — so personal notes stay per-user even under a team.
+      expect(getRequestUserId()).toBe(dana.id);
+      expect(getRequestStoreUserId()).toBe(teamScope(team.id));
+    });
   });
 });

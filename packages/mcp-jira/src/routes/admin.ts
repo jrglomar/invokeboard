@@ -20,11 +20,14 @@ import {
   getGlobalConfig, setGlobalConfig, getUserConfig, setUserConfig, getConnection,
   listConfigTemplates, createConfigTemplate, updateConfigTemplate, deleteConfigTemplate,
   findConfigTemplateByName, findConfigTemplateById,
-  type StoredUser,
+  listTeams, findTeamById, findTeamByName, createTeam, updateTeam, deleteTeam, listUsersByTeam, teamScope,
+  type StoredUser, type Team,
 } from "../lib/userStore.js";
 import { adminConfigSchema } from "../lib/adminConfig.js";
 import { hashPassword } from "../lib/auth/password.js";
 import { isDelegated, getEffectiveConnection } from "../lib/delegation.js";
+import { TEAM_SCOPED_STORE_NAMES } from "../lib/storage/registry.js";
+import { adoptScopeDocs } from "../lib/storage/adopt.js";
 
 export const adminRouter = express.Router();
 
@@ -100,6 +103,25 @@ function userView(u: StoredUser) {
     readOnly: sourceId !== null && !own.jira && u.allowWrites !== true,
     /** Eligible to lend credentials to others: owns a Jira connection and borrows from nobody. */
     canBeSource: own.jira && sourceId === null,
+    // v1.73 (ADR-084) — the team this user belongs to (storage SCOPE only; orthogonal to credentials).
+    teamId: u.teamId ?? null,
+    teamName: u.teamId ? (findTeamById(u.teamId)?.name ?? null) : null,
+  };
+}
+
+/** Safe-to-surface admin view of a team (v1.73, ADR-084). */
+function teamView(t: Team) {
+  const members = listUsersByTeam(t.id)
+    .map((u) => ({ id: u.id, email: u.email }))
+    .sort((a, b) => a.email.localeCompare(b.email));
+  return {
+    id: t.id,
+    name: t.name,
+    config: t.config,
+    createdAt: t.createdAt,
+    updatedAt: t.updatedAt,
+    memberCount: members.length,
+    members,
   };
 }
 
@@ -422,4 +444,123 @@ adminRouter.put("/api/admin/users/:id/role", requireAdmin, (req: Request, res: R
   }
   setUserRole(target.id, body.role);
   res.json({ ok: true, data: userView(findUserById(target.id) as StoredUser) });
+});
+
+// ── Teams (v1.73, ADR-084) ──────────────────────────────────────────────────
+
+const teamSchema = z.object({
+  name: z.string().min(1).max(80),
+  config: adminConfigSchema.optional(),
+});
+
+adminRouter.get("/api/admin/teams", requireAdmin, (_req: Request, res: Response) => {
+  res.json({ ok: true, data: { teams: listTeams().map(teamView) } });
+});
+
+adminRouter.post("/api/admin/teams", requireAdmin, (req: Request, res: Response) => {
+  let body;
+  try {
+    body = teamSchema.parse(req.body);
+  } catch (err) {
+    fail(res, 400, "VALIDATION", "A name is required", (err as ZodError).issues);
+    return;
+  }
+  if (findTeamByName(body.name)) {
+    fail(res, 409, "NAME_TAKEN", "A team with that name already exists");
+    return;
+  }
+  res.status(201).json({ ok: true, data: teamView(createTeam(body.name, body.config ?? {})) });
+});
+
+adminRouter.put("/api/admin/teams/:id", requireAdmin, (req: Request, res: Response) => {
+  const existing = findTeamById(req.params["id"] ?? "");
+  if (!existing) {
+    fail(res, 404, "NOT_FOUND", "Team not found");
+    return;
+  }
+  let body;
+  try {
+    body = teamSchema.partial().parse(req.body);
+  } catch (err) {
+    fail(res, 400, "VALIDATION", "Invalid team update", (err as ZodError).issues);
+    return;
+  }
+  if (body.name) {
+    const clash = findTeamByName(body.name);
+    if (clash && clash.id !== existing.id) {
+      fail(res, 409, "NAME_TAKEN", "A team with that name already exists");
+      return;
+    }
+  }
+  res.json({ ok: true, data: teamView(updateTeam(existing.id, body) as Team) });
+});
+
+adminRouter.delete("/api/admin/teams/:id", requireAdmin, (req: Request, res: Response) => {
+  const existing = findTeamById(req.params["id"] ?? "");
+  if (!existing) {
+    fail(res, 404, "NOT_FOUND", "Team not found");
+    return;
+  }
+  const members = listUsersByTeam(existing.id);
+  if (members.length > 0) {
+    fail(
+      res,
+      409,
+      "IN_USE",
+      `${members.length} user(s) belong to this team (${members.map((m) => m.email).join(", ")}). Reassign them first.`
+    );
+    return;
+  }
+  deleteTeam(existing.id);
+  res.json({ ok: true, data: { deleted: true } });
+});
+
+const teamAssignSchema = z.object({ teamId: z.string().min(1).nullable() });
+
+// PUT /api/admin/users/:id/team — assign/clear the team a user belongs to (storage SCOPE only).
+adminRouter.put("/api/admin/users/:id/team", requireAdmin, (req: Request, res: Response) => {
+  const target = findUserById(req.params["id"] ?? "");
+  if (!target) {
+    fail(res, 404, "NOT_FOUND", "User not found");
+    return;
+  }
+  let body;
+  try {
+    body = teamAssignSchema.parse(req.body);
+  } catch (err) {
+    fail(res, 400, "VALIDATION", "teamId is required (string or null)", (err as ZodError).issues);
+    return;
+  }
+  if (body.teamId !== null && !findTeamById(body.teamId)) {
+    fail(res, 404, "NOT_FOUND", "Team not found");
+    return;
+  }
+  const updated = updateUser(target.id, { teamId: body.teamId });
+  res.json({ ok: true, data: userView(updated as StoredUser) });
+});
+
+const adoptSchema = z.object({ fromUserId: z.string().min(1) });
+
+// POST /api/admin/teams/:id/adopt — one-time seeding: copy a user's personal docs into the team's
+// shared scope. Non-destructive (see storage/adopt.ts) — never overwrites a doc already at the target.
+adminRouter.post("/api/admin/teams/:id/adopt", requireAdmin, (req: Request, res: Response) => {
+  const team = findTeamById(req.params["id"] ?? "");
+  if (!team) {
+    fail(res, 404, "NOT_FOUND", "Team not found");
+    return;
+  }
+  let body;
+  try {
+    body = adoptSchema.parse(req.body);
+  } catch (err) {
+    fail(res, 400, "VALIDATION", "fromUserId is required", (err as ZodError).issues);
+    return;
+  }
+  if (!findUserById(body.fromUserId)) {
+    fail(res, 404, "NOT_FOUND", "Source user not found");
+    return;
+  }
+  // The source of a user's OWN personal docs is their raw user id — NOT a team scope.
+  const result = adoptScopeDocs(body.fromUserId, teamScope(team.id), TEAM_SCOPED_STORE_NAMES);
+  res.json({ ok: true, data: result });
 });

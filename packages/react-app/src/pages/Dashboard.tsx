@@ -344,6 +344,7 @@ export function Dashboard({
               sprintId={effectiveSprintId}
               sprintKeys={sprintKeys}
               issuePrs={issuePrs.data}
+              issues={sprintIssues}
             />
           </section>
           {/* v1.16 (ADR-027): impediments log + pending-PR list for daily visibility.

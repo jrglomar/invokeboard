@@ -46,3 +46,11 @@ const OVERRIDE_BY_NAME: Record<string, () => string> = {
 export function resolveJsonOverride(name: string): string {
   return OVERRIDE_BY_NAME[name]?.() ?? "";
 }
+
+/**
+ * v1.73 (ADR-084) — the doc names a TEAM shares. Exactly `SHARED_STORE_NAMES` minus `"users"` (the
+ * one global account list) — `journal` is absent by design too, since personal notes stay per-user.
+ */
+export const TEAM_SCOPED_STORE_NAMES: readonly string[] = SHARED_STORE_NAMES.filter(
+  (name) => name !== "users"
+);

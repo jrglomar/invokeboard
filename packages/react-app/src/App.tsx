@@ -49,7 +49,7 @@ const ADMIN_TAB: { id: Tab; label: string; icon: typeof LayoutDashboard } = {
 // v1.24/ADR-036); the main column is now FULL-WIDTH with compact paddings so every
 // page gets the whole viewport.
 function AppShell() {
-  const { logout, role, readOnly, sharedFrom } = useAuth();
+  const { logout, role, readOnly, sharedFrom, team } = useAuth();
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
 
   // v1.45 (ADR-055): admins get the extra Admin tab; everyone else sees the standard set.
@@ -156,6 +156,15 @@ function AppShell() {
                 title={sharedFrom ? `Using ${sharedFrom}'s Jira credentials — you can view but not change Jira` : undefined}
               >
                 Read-only
+              </span>
+            )}
+            {/* v1.73 (ADR-084): a shared team scope — tells a member which team's board they're on */}
+            {team && (
+              <span
+                className="hidden sm:inline text-[0.625rem] font-semibold px-1.5 py-0.5 bg-primary/10 text-primary rounded-full whitespace-nowrap"
+                title={`Shared team scope: ${team.name} — leaves, retro, meeting notes and more are shared with this team`}
+              >
+                Team: {team.name}
               </span>
             )}
             {/* v1.49 (ADR-060): in-app user guide — a header button, not a tab (keeps the nav lean) */}

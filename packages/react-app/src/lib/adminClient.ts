@@ -60,6 +60,9 @@ export interface AdminUser {
   readOnly: boolean;
   /** May lend credentials to others (owns a Jira connection, borrows from nobody). */
   canBeSource: boolean;
+  /** v1.73 (ADR-084) — the team this user belongs to (storage SCOPE only; orthogonal to credentials). */
+  teamId: string | null;
+  teamName: string | null;
 }
 
 export interface AdminUsersResponse {
@@ -154,4 +157,60 @@ export function applyTemplateToUser(userId: string, templateId: string, merge = 
 /** Apply a template to the global defaults. */
 export function applyTemplateToGlobal(templateId: string, merge = false): Promise<{ globalConfig: AdminConfig }> {
   return credFetch<{ globalConfig: AdminConfig }>("/api/admin/config/apply-template", "POST", { templateId, merge });
+}
+
+// ── v1.73 (ADR-084) — Teams: a shared team scope ──────────────────────────────
+// A team is a THIRD scope input (independent of credential delegation, ADR-056): every member
+// assigned to the same team reads/writes the SAME leaves/retro/meeting-notes/etc., while each still
+// authenticates with their own Jira/GitHub/AI. See CONTRACTS.md §9.10 / ADR-084.
+
+export interface TeamMemberRef {
+  id: string;
+  email: string;
+}
+
+/** Safe-to-surface admin view of a team — identity + resolved membership, no secrets. */
+export interface TeamView {
+  id: string;
+  name: string;
+  config: AdminConfig; // team-level board/env defaults — sits between global defaults and per-user overrides
+  createdAt: string;
+  updatedAt: string;
+  memberCount: number;
+  members: TeamMemberRef[];
+}
+
+/** Result of a one-time adopt (seed): which team-scoped docs were copied vs. already present/absent. */
+export interface AdoptResult {
+  copied: string[];
+  skipped: string[];
+}
+
+export function listTeams(): Promise<{ teams: TeamView[] }> {
+  return credFetch<{ teams: TeamView[] }>("/api/admin/teams", "GET");
+}
+
+export function createTeam(name: string, config?: AdminConfig): Promise<TeamView> {
+  return credFetch<TeamView>("/api/admin/teams", "POST", { name, config });
+}
+
+export function updateTeam(id: string, patch: { name?: string; config?: AdminConfig }): Promise<TeamView> {
+  return credFetch<TeamView>(`/api/admin/teams/${id}`, "PUT", patch);
+}
+
+export function deleteTeam(id: string): Promise<{ deleted: boolean }> {
+  return credFetch<{ deleted: boolean }>(`/api/admin/teams/${id}`, "DELETE");
+}
+
+/** Assign (or clear, with `teamId: null`) the team a user belongs to — storage SCOPE only. */
+export function setUserTeam(userId: string, teamId: string | null): Promise<AdminUser> {
+  return credFetch<AdminUser>(`/api/admin/users/${userId}/team`, "PUT", { teamId });
+}
+
+/**
+ * One-time, non-destructive seed: copies `fromUserId`'s existing personal documents into the team's
+ * shared scope. Never overwrites a document the team already has — safe to run more than once.
+ */
+export function adoptIntoTeam(teamId: string, fromUserId: string): Promise<AdoptResult> {
+  return credFetch<AdoptResult>(`/api/admin/teams/${teamId}/adopt`, "POST", { fromUserId });
 }

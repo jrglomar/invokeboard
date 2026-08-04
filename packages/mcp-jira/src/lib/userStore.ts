@@ -43,6 +43,14 @@ export interface StoredUser {
    * source's connection, even if the source has one; it shows as disconnected instead.
    */
   sharedProviders?: ConnectionProvider[];
+  /**
+   * v1.73 (ADR-084) — TEAM SCOPE. When set, this user's shared documents (leaves, retro, meeting
+   * notes, impediments, offset, prs, post-scrum, meeting-goal, team, draft-plan) live at the team's
+   * scope instead of `sharedFrom ?? userId` — every member of the same team reads/writes the SAME
+   * documents. Orthogonal to `credentialSourceUserId`: team decides SCOPE, delegation still decides
+   * CREDENTIALS. null/absent = the user has no team (falls back to the ADR-056 rule).
+   */
+  teamId?: string | null;
 }
 
 /** Fields an admin may set when creating/updating a user (never the password hash directly). */
@@ -55,6 +63,8 @@ export interface UserPatch {
   disabled?: boolean;
   /** v1.67 (ADR-078) — null clears the restriction back to share-all, same convention as above. */
   sharedProviders?: ConnectionProvider[] | null;
+  /** v1.73 (ADR-084) — null clears team membership, same null-clears convention as above. */
+  teamId?: string | null;
 }
 
 /** A stored connection: the sealed token + non-secret masked metadata (safe to surface). */
@@ -76,16 +86,31 @@ export interface ConfigTemplate {
   updatedAt: string;
 }
 
+/**
+ * v1.73 (ADR-084) — a shared TEAM SCOPE. Every user with `StoredUser.teamId` set to this team's id
+ * reads/writes the same shared documents (leaves, retro, meeting notes, impediments, offset, prs,
+ * post-scrum, meeting-goal, team, draft-plan) while keeping their own Jira/GitHub/AI credentials.
+ * `config` is a team-level admin-config layer (see userConfig.ts's merge order).
+ */
+export interface Team {
+  id: string;
+  name: string;
+  config: AdminConfig;
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface UserStoreFile {
   users: Record<string, StoredUser>; // keyed by user id
   connections: Record<string, Partial<Record<ConnectionProvider, StoredConnection>>>; // keyed by user id
   globalConfig: AdminConfig; // v1.45 (ADR-055) — admin-set defaults for everyone
   userConfigs: Record<string, AdminConfig>; // v1.45 — admin-set per-user overrides, keyed by user id
   configTemplates: Record<string, ConfigTemplate>; // v1.47 (ADR-057) — reusable config bundles
+  teams: Record<string, Team>; // v1.73 (ADR-084) — shared team scopes, keyed by team id
 }
 
 function emptyStore(): UserStoreFile {
-  return { users: {}, connections: {}, globalConfig: {}, userConfigs: {}, configTemplates: {} };
+  return { users: {}, connections: {}, globalConfig: {}, userConfigs: {}, configTemplates: {}, teams: {} };
 }
 
 /** Legacy records (pre-v1.45) have no `role` — default them to "user" on read. */
@@ -106,6 +131,7 @@ function read(): UserStoreFile {
     globalConfig: obj.globalConfig ?? {},
     userConfigs: obj.userConfigs ?? {},
     configTemplates: obj.configTemplates ?? {},
+    teams: obj.teams ?? {}, // v1.73 (ADR-084) — legacy docs have no `teams` key
   };
 }
 
@@ -183,6 +209,10 @@ export function updateUser(id: string, patch: UserPatch): StoredUser | null {
     if (patch.sharedProviders === null) delete user.sharedProviders;
     else user.sharedProviders = patch.sharedProviders;
   }
+  if (patch.teamId !== undefined) {
+    if (patch.teamId === null) delete user.teamId;
+    else user.teamId = patch.teamId;
+  }
   data.users[id] = user;
   write(data);
   return user;
@@ -202,6 +232,11 @@ export function deleteUser(id: string): boolean {
 /** v1.46 — everyone who borrows this user's credentials (blocks deleting a credential source). */
 export function listUsersByCredentialSource(sourceId: string): StoredUser[] {
   return Object.values(read().users).filter((u) => u.credentialSourceUserId === sourceId);
+}
+
+/** v1.73 (ADR-084) — everyone on this team (blocks deleting a team while members remain). */
+export function listUsersByTeam(teamId: string): StoredUser[] {
+  return Object.values(read().users).filter((u) => u.teamId === teamId);
 }
 
 // ── Admin config (v1.45, ADR-055) — global defaults + per-user overrides ────────
@@ -269,6 +304,60 @@ export function deleteConfigTemplate(id: string): boolean {
   const data = read();
   if (!data.configTemplates[id]) return false;
   delete data.configTemplates[id];
+  write(data);
+  return true;
+}
+
+// ── Teams (v1.73, ADR-084) ──────────────────────────────────────────────────
+
+/**
+ * The scope a team's shared documents live at. Must stay filesystem-safe — the json driver turns a
+ * scope string directly into a directory name — so the `team-` prefix is deliberate (no character a
+ * Windows path component disallows, unlike e.g. `team:<id>`) and disjoint from any user id
+ * (`crypto.randomUUID()` values never start with `team-`).
+ */
+export function teamScope(teamId: string): string {
+  return `team-${teamId}`;
+}
+
+export function listTeams(): Team[] {
+  return Object.values(read().teams).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function findTeamById(id: string): Team | null {
+  return read().teams[id] ?? null;
+}
+
+export function findTeamByName(name: string): Team | null {
+  const norm = name.trim().toLowerCase();
+  return listTeams().find((t) => t.name.toLowerCase() === norm) ?? null;
+}
+
+export function createTeam(name: string, config: AdminConfig = {}): Team {
+  const data = read();
+  const now = new Date().toISOString();
+  const team: Team = { id: crypto.randomUUID(), name: name.trim(), config, createdAt: now, updatedAt: now };
+  data.teams[team.id] = team;
+  write(data);
+  return team;
+}
+
+export function updateTeam(id: string, patch: { name?: string; config?: AdminConfig }): Team | null {
+  const data = read();
+  const team = data.teams[id];
+  if (!team) return null;
+  if (patch.name !== undefined) team.name = patch.name.trim();
+  if (patch.config !== undefined) team.config = patch.config;
+  team.updatedAt = new Date().toISOString();
+  data.teams[id] = team;
+  write(data);
+  return team;
+}
+
+export function deleteTeam(id: string): boolean {
+  const data = read();
+  if (!data.teams[id]) return false;
+  delete data.teams[id];
   write(data);
   return true;
 }
