@@ -4,6 +4,9 @@ How to run the stack with Docker, what to configure, and what to harden before a
 real (non-local) deployment. For local dev without Docker, see `docs/SETUP.md`.
 For how the pieces connect, see `docs/ARCHITECTURE.md`.
 
+> **Just want to put it on a server?** Follow [DEPLOY-QUICKSTART.md](DEPLOY-QUICKSTART.md), a
+> plain step-by-step guide for someone new to the project. This file is the full reference behind it.
+
 > **What gets deployed:** the two MCP **HTTP bridges** (`mcp-jira`, `mcp-github`)
 > and the **web** SPA. The **stdio** MCP servers are a local VS Code Copilot
 > integration and are **not** containerized.
