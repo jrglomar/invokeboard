@@ -9,6 +9,7 @@ import { getConfig, getStorageSqliteFilePath } from "../config.js";
 import { getRequestStoreUserId } from "../requestContext.js";
 import { createJsonDriver } from "./jsonDriver.js";
 import { createSqliteDriver } from "./sqliteDriver.js";
+import { createMysqlDriver } from "./mysqlDriver.js";
 import { loadJsonImportCandidates } from "./autoImport.js";
 import { resolveJsonOverride } from "./registry.js";
 import { SHARED_SCOPE, type StorageDriver } from "./port.js";
@@ -25,12 +26,34 @@ function buildDriver(): StorageDriver {
       loadImportCandidates: loadJsonImportCandidates,
     });
   }
+  if (cfg.STORAGE_DRIVER === "mysql") {
+    return createMysqlDriver(cfg.STORAGE_MYSQL_URL.trim());
+  }
   return createJsonDriver({ resolveOverride: resolveJsonOverride });
 }
 
 function getDriver(): StorageDriver {
   if (!cachedDriver) cachedDriver = buildDriver();
   return cachedDriver;
+}
+
+/**
+ * v1.74 (ADR-085) — prepare the configured driver before the first request: a no-op for json/sqlite
+ * (they open lazily and synchronously), connect + create table + preload for mysql. Both entries
+ * (http.ts, stdio index.ts) await this before serving.
+ */
+export async function initStorage(): Promise<void> {
+  await getDriver().init?.();
+}
+
+/** v1.74 — wait for queued writes to persist (mysql write-behind); a no-op for json/sqlite. */
+export async function flushStorage(): Promise<void> {
+  await getDriver().flush?.();
+}
+
+/** Total stored docs, or null when the driver can't count (json). Used by the import script. */
+export function countDocs(): number | null {
+  return getDriver().countDocs?.() ?? null;
 }
 
 /** Clear the memoized driver — tests use this after changing STORAGE_DRIVER/STORAGE_SQLITE_FILE. */

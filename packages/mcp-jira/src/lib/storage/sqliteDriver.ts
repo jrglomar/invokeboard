@@ -141,5 +141,8 @@ export function createSqliteDriver(filePath: string, opts: SqliteDriverOptions =
     writeDoc(scope: string, name: string, data: unknown): void {
       ensureOpen().prepare(UPSERT_SQL).run(scope, name, JSON.stringify(data), new Date().toISOString());
     },
+    countDocs(): number {
+      return (ensureOpen().prepare("SELECT COUNT(*) AS count FROM docs").get() as { count: number }).count;
+    },
   };
 }

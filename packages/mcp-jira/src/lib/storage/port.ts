@@ -27,4 +27,12 @@ export interface StorageDriver {
   readDoc(scope: string, name: string): unknown;
   /** Persist `data` for (scope, name), replacing any previous value. May throw on FS/DB errors. */
   writeDoc(scope: string, name: string, data: unknown): void;
+  /**
+   * v1.74 (ADR-085) — optional async lifecycle, only implemented by drivers that need it (mysql).
+   * `init` must resolve before the first readDoc/writeDoc; `flush` waits for pending writes.
+   */
+  init?(): Promise<void>;
+  flush?(): Promise<void>;
+  /** Total docs stored (all scopes) — used by the import script's empty-target guard. */
+  countDocs?(): number;
 }

@@ -37,3 +37,7 @@ Thumbs.db
 # Docs are not needed at build/runtime (keep nginx.conf — it's not .md)
 *.md
 docs
+
+# v1.74 (ADR-085): exported data bundles/backups — never bake into an image
+backups
+import

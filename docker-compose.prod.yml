@@ -1,0 +1,111 @@
+# InvokeBoard — PRODUCTION / server stack (v1.74, ADR-085).
+#
+# Differences from the local docker-compose.yml:
+#   • storage is MySQL (STORAGE_DRIVER=mysql) in its own container + named volume
+#   • NO bridge port and NO mysql port is published on the host — only nginx (web) is reachable,
+#     and only on 127.0.0.1:8080 (for a host reverse proxy such as Caddy); cloudflared reaches it
+#     over the compose network
+#   • log rotation on every service
+#
+#   ┌──────────────┐        ┌──────────────┐   jira:4001   ┌───────┐   ┌───────────┐
+#   │ cloudflared  │──web──▶│ web (nginx)  │──────────────▶│ jira  │──▶│ mysql:3306│
+#   │  (tunnel)    │        │ 127.0.0.1:8080│─github:4002─▶│github │   └───────────┘
+#   └──────────────┘        └──────────────┘               └───────┘
+#
+# First deploy (full runbook: docs/DEPLOYMENT.md §9):
+#   cp .env.prod.example .env                 # fill in; SAME TOKEN_ENC_KEY as the old deployment
+#   docker compose -f docker-compose.prod.yml up -d mysql
+#   docker compose -f docker-compose.prod.yml run --rm -v "$PWD/import:/import" jira \
+#     npx tsx packages/mcp-jira/scripts/storage-import.ts /import/<bundle>.json
+#   docker compose -f docker-compose.prod.yml up -d --build
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-invokeboard}
+      MYSQL_USER: ${MYSQL_USER:-invokeboard}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_bin"]
+    volumes:
+      - invokeboard-mysql:/var/lib/mysql
+    healthcheck:
+      # $$ = a literal $ for the container shell (not compose interpolation).
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    # No `ports:` — reachable only as mysql:3306 on the compose network.
+    logging: *logging
+    restart: unless-stopped
+
+  jira:
+    build:
+      context: .
+      dockerfile: docker/jira.Dockerfile
+    image: invokeboard/mcp-jira:latest
+    env_file: .env
+    environment:
+      MCP_JIRA_HTTP_PORT: "4001"
+      STORAGE_DRIVER: mysql
+      # URL-safe password required (letters/digits) — see .env.prod.example.
+      STORAGE_MYSQL_URL: mysql://${MYSQL_USER:-invokeboard}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-invokeboard}
+      # Kept for the sqlite rollback path + storage-export/import scratch space.
+      STORAGE_SQLITE_FILE: /data/.invokeboard-stores.sqlite
+    volumes:
+      - invokeboard-data:/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+    # Write-behind cache flush on shutdown (ADR-085) — give it room beyond the 8s flush bound.
+    stop_grace_period: 15s
+    logging: *logging
+    restart: unless-stopped
+
+  github:
+    build:
+      context: .
+      dockerfile: docker/github.Dockerfile
+    image: invokeboard/mcp-github:latest
+    env_file: .env
+    environment:
+      MCP_GITHUB_HTTP_PORT: "4002"
+    logging: *logging
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+      args:
+        VITE_MCP_JIRA_URL: /jira
+        VITE_MCP_GITHUB_URL: /github
+    image: invokeboard/web:latest
+    depends_on:
+      - jira
+      - github
+    ports:
+      # Loopback only — expose to the world through cloudflared (below) or a host TLS proxy (Caddy).
+      - "127.0.0.1:8080:80"
+    logging: *logging
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN:?set CF_TUNNEL_TOKEN in .env (or remove this service)}
+    depends_on:
+      - web
+    logging: *logging
+    restart: unless-stopped
+
+volumes:
+  invokeboard-mysql:
+  invokeboard-data:

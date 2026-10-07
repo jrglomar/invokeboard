@@ -184,3 +184,31 @@ describe("STORAGE_DRIVER / STORAGE_SQLITE_FILE (v1.65, ADR-077)", () => {
     expect(p.endsWith(path.join("mcp-jira", "custom.sqlite"))).toBe(true);
   });
 });
+
+describe("STORAGE_DRIVER=mysql / STORAGE_MYSQL_URL (v1.74, ADR-085)", () => {
+  it("accepts mysql with a connection URL", () => {
+    setRequiredVars();
+    process.env["STORAGE_DRIVER"] = "mysql";
+    process.env["STORAGE_MYSQL_URL"] = "mysql://u:p@mysql:3306/invokeboard";
+    const cfg = getConfig();
+    expect(cfg.STORAGE_DRIVER).toBe("mysql");
+    expect(cfg.STORAGE_MYSQL_URL).toBe("mysql://u:p@mysql:3306/invokeboard");
+  });
+
+  it("fails fast with a ConfigError naming STORAGE_MYSQL_URL when mysql has no URL", () => {
+    setRequiredVars();
+    process.env["STORAGE_DRIVER"] = "mysql";
+    delete process.env["STORAGE_MYSQL_URL"];
+    expect(() => getConfig()).toThrow(ConfigError);
+    resetConfigCache();
+    process.env["STORAGE_MYSQL_URL"] = "   ";
+    expect(() => getConfig()).toThrow(/STORAGE_MYSQL_URL/);
+  });
+
+  it("does not require STORAGE_MYSQL_URL for the json/sqlite drivers", () => {
+    setRequiredVars();
+    process.env["STORAGE_DRIVER"] = "sqlite";
+    delete process.env["STORAGE_MYSQL_URL"];
+    expect(getConfig().STORAGE_MYSQL_URL).toBe("");
+  });
+});

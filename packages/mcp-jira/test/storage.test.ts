@@ -22,6 +22,8 @@ import { SHARED_SCOPE, type StorageDriver } from "../src/lib/storage/port.js";
 import { createJsonDriver } from "../src/lib/storage/jsonDriver.js";
 import { createSqliteDriver, runAutoImportIfEmpty } from "../src/lib/storage/sqliteDriver.js";
 import { loadJsonImportCandidates } from "../src/lib/storage/autoImport.js";
+import { createMysqlDriver } from "../src/lib/storage/mysqlDriver.js";
+import { createFakeMysqlPool } from "./helpers/fakeMysqlPool.js";
 
 function mkTmpDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -39,11 +41,11 @@ function rmTmpDir(dir: string): void {
 // A. Shared contract suite — run against both drivers
 // ============================================================================
 
-function runContractSuite(makeDriver: () => StorageDriver): void {
+function runContractSuite(makeDriver: () => StorageDriver | Promise<StorageDriver>): void {
   let driver: StorageDriver;
 
-  beforeEach(() => {
-    driver = makeDriver();
+  beforeEach(async () => {
+    driver = await makeDriver();
   });
 
   it("returns null for a doc that was never written", () => {
@@ -101,6 +103,15 @@ describe("storage driver contract — json", () => {
 
 describe("storage driver contract — sqlite", () => {
   runContractSuite(() => createSqliteDriver(":memory:"));
+});
+
+// v1.74 (ADR-085): the mysql driver against an in-memory fake pool (offline) — see storageMysql.test.ts.
+describe("storage driver contract — mysql (fake pool)", () => {
+  runContractSuite(async () => {
+    const driver = createMysqlDriver("mysql://test", { pool: createFakeMysqlPool(), log: () => {} });
+    await driver.init();
+    return driver;
+  });
 });
 
 // ============================================================================
