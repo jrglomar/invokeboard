@@ -12,6 +12,7 @@ coverage/
 # v1.65: the negation above only covered .env.example — this template was silently
 # ignored (and thus never committed) since it was created. It holds placeholders only.
 !.env.docker.example
+!.env.prod.example
 
 # Leaves/offset + team roster stores (v1.5/v1.8 — host-local JSON, never committed)
 .invokeboard-leaves.json
@@ -49,3 +50,8 @@ coverage/
 .DS_Store
 *.local
 .idea/
+# v1.74 (ADR-085): sqlite store + exported data bundles/backups (contain SEALED tokens, NEVER committed)
+.invokeboard-stores.sqlite*
+*.invokeboard-stores.sqlite*
+backups/
+import/

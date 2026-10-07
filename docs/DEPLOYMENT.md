@@ -78,8 +78,11 @@ the keys it needs; extras are ignored. Full annotated list: `.env.docker.example
 | `AI_PROVIDER` (+ `GITHUB_MODELS_TOKEN` / `ANTHROPIC_API_KEY`) | jira | optional | enables AI drafting; unset = deterministic templates |
 | `CORS_ORIGINS` | jira, github | optional | allowlist when the browser hits the bridges cross-origin (not needed with the proxy) |
 | `JIRA_LEAVES_FILE` / `JIRA_TEAM_FILE` | jira | set by compose | JSON store paths (→ `/data` volume) |
-| `STORAGE_DRIVER` | jira | optional, default `json` | `json` (per-file, today's behavior) or `sqlite` (one db file — §3.3) |
+| `STORAGE_DRIVER` | jira | optional, default `json` | `json` (per-file), `sqlite` (one db file — §3.3) or `mysql` (v1.74 — §3.4, §9) |
 | `STORAGE_SQLITE_FILE` | jira | optional, default `.invokeboard-stores.sqlite` | sqlite db path; only used when `STORAGE_DRIVER=sqlite` |
+| `STORAGE_MYSQL_URL` | jira | required iff `STORAGE_DRIVER=mysql` | `mysql://user:pass@mysql:3306/invokeboard` — `docker-compose.prod.yml` builds it from `MYSQL_*` |
+| `MYSQL_DATABASE` / `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_ROOT_PASSWORD` | mysql (prod compose) | ✅ in prod | MySQL bootstrap; URL-safe passwords (`openssl rand -hex 24`) |
+| `CF_TUNNEL_TOKEN` | cloudflared | ✅ if tunnelling | Cloudflare Tunnel token |
 | `MCP_JIRA_HTTP_PORT` / `MCP_GITHUB_HTTP_PORT` | jira / github | default 4001 / 4002 | bridge ports |
 
 ### 3.2 The SPA's bridge URLs are baked at BUILD time
@@ -144,6 +147,36 @@ eleven-plus-per-user; it lives on the same `invokeboard-data` volume, so the exi
 command above (and the nightly-cron example in §5, item 5) already covers it once `docker
 cp`/tar picks up the whole volume. The same `.env`-never-travels-with-the-data-volume rule
 applies — `.invokeboard-stores.sqlite` holds the same sealed tokens `.invokeboard-users.json` did.
+
+### 3.4 MySQL storage (v1.74, ADR-085)
+
+`STORAGE_DRIVER=mysql` keeps the exact same one-table shape (`docs`: scope, name, data, updated_at) in
+MySQL. The storage port is synchronous, so the bridge **loads every doc into memory at startup**. You'll
+see `[storage] STORAGE_DRIVER=mysql (...): loaded N doc(s)` in `docker compose logs jira`. Reads come
+from that cache, and writes are saved to MySQL **behind** it through one serialized queue. If MySQL
+blips, the queue retries with backoff, and `docker compose stop/down` flushes it. Operationally:
+
+- **Run exactly one `jira` replica** (§5.8). A second one would serve a stale cache.
+- A **hard kill** (SIGKILL, OOM, power loss) can drop writes still in the queue, which are typically
+  milliseconds old. Normal stops and redeploys flush first (`stop_grace_period: 15s`).
+- **Edits made directly in MySQL** (manual SQL, a restore) are not seen until `jira` restarts.
+  `scripts/restore-mysql.sh` stops and starts it for you.
+
+### 3.5 Exporting all data (any driver → a portable bundle)
+
+```bash
+node scripts/export-data.mjs                                          # local stack (docker-compose.yml)
+node scripts/export-data.mjs --compose-file docker-compose.prod.yml   # a sqlite/json-backed prod stack
+```
+
+This writes `./backups/<timestamp>/`, containing:
+- `invokeboard-export-*.json`: the portable bundle, with every (scope, name) doc.
+- `invokeboard-stores-*.sqlite`: a consistent online copy (sqlite driver).
+- `invokeboard-data-volume.tar.gz`: a raw `/data` tar.
+
+It then checks the bundle's doc count against the live table. `backups/` is git-ignored and
+docker-ignored. **The bundle contains sealed tokens**, so store it apart from `.env` (§5.5). On a MySQL
+deployment, back up with `scripts/backup-mysql.sh` instead (§9.5).
 
 ---
 
@@ -236,7 +269,10 @@ were added/expanded per a v1.63 security review — ADR-075):
    unchanged by `STORAGE_DRIVER=sqlite` (v1.65)** — a local `better-sqlite3` file
    is still one file on one instance's disk, not a network database; it collapses
    eleven-plus-per-user files into one for backup/porting convenience, it does
-   not add multi-replica sharing. The one-replica rule stands either way.
+   not add multi-replica sharing. The one-replica rule stands either way. **With
+   `STORAGE_DRIVER=mysql` (v1.74) the rule is load-bearing.** MySQL *is* a network database, but the
+   bridge serves reads from an in-memory cache loaded at startup (§3.4). A second replica would read
+   stale data, and the two would overwrite each other.
 9. **Image slimming (optional).** The bridge images currently run via `tsx` and
    include devDependencies. To slim: add a JS emit (`tsc` with `outDir`), run
    `node dist/http.js`, and `npm prune --omit=dev` (or a multi-stage copy of just
@@ -302,3 +338,99 @@ reason about, but exposes the bridge ports and requires CORS.
 | `docker/nginx.conf` | SPA serving + `/jira`,`/github` reverse proxy |
 | `.dockerignore` | keeps `node_modules`, secrets, stores out of the build context |
 | `.env.docker.example` | template for `.env` |
+| `docker-compose.prod.yml` | server stack: adds `mysql:8.4`, no host-exposed bridge/db ports, loopback `web`, log rotation (v1.74) |
+| `.env.prod.example` | template for the server's `.env` (adds `MYSQL_*`, `CF_TUNNEL_TOKEN`, secrets) |
+| `scripts/export-data.mjs` | pull all data out of a running stack into `./backups/<ts>/` (§3.5) |
+| `packages/mcp-jira/scripts/storage-export.ts` / `storage-import.ts` | bundle export / import + verify (§3.5, §9.3) |
+| `scripts/backup-mysql.sh` / `scripts/restore-mysql.sh` | MySQL dump with rotation / restore (§9.5) |
+
+---
+
+## 9. Server deploy — production compose + MySQL (v1.74, ADR-085)
+
+Target: one Linux server (Ubuntu/Debian, ≥ 2 GB RAM) with Docker Engine and Compose v2. Public access
+goes through the bundled Cloudflare Tunnel (no inbound ports), or through a host TLS proxy (Caddy) in
+front of `127.0.0.1:8080`.
+
+### 9.1 On the OLD host: export
+
+```bash
+node scripts/export-data.mjs          # → ./backups/<ts>/invokeboard-export-<ts>.json (+ .sqlite + tar)
+```
+
+Note the doc count it prints (`verify: live docs=N … OK`). Also copy `TOKEN_ENC_KEY` and
+`SESSION_SECRET` from the old `.env`, **using a separate channel from the bundle** (§5.5).
+
+### 9.2 On the server: install and configure
+
+```bash
+curl -fsSL https://get.docker.com | sh            # Docker Engine + compose plugin
+sudo usermod -aG docker $USER && newgrp docker
+git clone https://github.com/jrglomar/invokeboard.git /opt/invokeboard && cd /opt/invokeboard
+cp .env.prod.example .env && chmod 600 .env
+#  edit .env: Jira/GitHub vars, the OLD TOKEN_ENC_KEY + SESSION_SECRET verbatim,
+#  MYSQL_PASSWORD / MYSQL_ROOT_PASSWORD (openssl rand -hex 24), CF_TUNNEL_TOKEN
+```
+
+> **TOKEN_ENC_KEY must be identical to the old deployment's.** A different key leaves every stored
+> Jira/GitHub/AI connection undecryptable, and users would have to reconnect.
+
+### 9.3 Import the data into MySQL
+
+```bash
+mkdir -p import && chmod 700 import
+# from your machine: scp backups/<ts>/invokeboard-export-<ts>.json server:/opt/invokeboard/import/
+docker compose -f docker-compose.prod.yml up -d mysql            # wait for (healthy)
+docker compose -f docker-compose.prod.yml build jira
+docker compose -f docker-compose.prod.yml run --rm -v "$PWD/import:/import" jira \
+  npx tsx packages/mcp-jira/scripts/storage-import.ts /import/invokeboard-export-<ts>.json
+```
+
+Expect `imported N` and `verified N/N`, where N matches the count from §9.1. The import refuses to
+write into a non-empty database. Re-run with `--force` only if you mean to upsert over the existing
+docs. Afterwards, run `shred -u import/*.json` or move the bundle to your backup location, because it
+holds sealed tokens.
+
+### 9.4 Start and check
+
+```bash
+docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.prod.yml ps                          # mysql/jira/github healthy
+docker compose -f docker-compose.prod.yml logs jira | grep "loaded"   # loaded N doc(s)
+curl -s http://127.0.0.1:8080/jira/api/health && curl -s http://127.0.0.1:8080/github/api/health
+```
+
+Then sign in through the public hostname and spot-check leaves, team, retro and journals. Point the
+Cloudflare Tunnel's public hostname at `http://web:80`. Once the server is live, **stop the old host's
+`cloudflared`** (or the whole old stack). Two connectors on one tunnel token split traffic between
+the old and new hosts.
+
+### 9.5 Backups
+
+```bash
+scripts/backup-mysql.sh                      # → /backups/invokeboard/invokeboard-mysql-<ts>.sql.gz (keeps 14)
+# crontab -e
+0 2 * * * cd /opt/invokeboard && scripts/backup-mysql.sh >> /var/log/invokeboard-backup.log 2>&1
+scripts/restore-mysql.sh /backups/invokeboard/invokeboard-mysql-<ts>.sql.gz   # stops/starts jira
+```
+
+Ship `/backups/invokeboard` off the box (rclone/restic/S3), and **never together with `.env`**.
+
+### 9.6 Updating
+
+```bash
+cd /opt/invokeboard && git pull
+docker compose -f docker-compose.prod.yml up -d --build          # jira flushes its write queue on stop
+```
+
+### 9.7 Rollback to sqlite
+
+`STORAGE_DRIVER` is set in the `environment:` block of the jira service in `docker-compose.prod.yml`.
+To fall back:
+1. Copy the §9.1 `.sqlite` file into the `invokeboard-data` volume as
+   `/data/.invokeboard-stores.sqlite` (use `docker compose cp`).
+2. Change `STORAGE_DRIVER: mysql` to `sqlite`.
+3. Run `up -d jira`.
+
+Alternatively, import a fresh bundle into an empty sqlite file with `storage-import.ts` under
+`STORAGE_DRIVER=sqlite`.

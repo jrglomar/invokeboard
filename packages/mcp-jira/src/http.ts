@@ -22,6 +22,7 @@ import * as path from "path";
 import { z } from "zod";
 import { tools } from "./tools/index.js";
 import { getConfig, getProjects, getOffsetPolicy, getAgingPolicy, type ProjectRef } from "./lib/config.js";
+import { initStorage, flushStorage } from "./lib/storage/index.js";
 import { UpstreamError, ConfigError } from "./lib/errors.js";
 import { ZodError } from "zod";
 import { getAiProvider, getAiStatus } from "./lib/ai/provider.js";
@@ -717,9 +718,25 @@ if (process.env["VITEST"] !== "true") {
     process.exit(1);
   }
 
-  app.listen(port, () => {
-    process.stdout.write(
-      `mcp-jira HTTP bridge listening on http://localhost:${port}\n`
-    );
-  });
+  // v1.74 (ADR-085): mysql storage connects + preloads its cache BEFORE the first request
+  // (json/sqlite: no-op). On shutdown, queued write-behind writes are flushed before exit.
+  initStorage()
+    .then(() => {
+      app.listen(port, () => {
+        process.stdout.write(
+          `mcp-jira HTTP bridge listening on http://localhost:${port}\n`
+        );
+      });
+    })
+    .catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[mcp-jira] Storage init failed at startup: ${msg}\n`);
+      process.exit(1);
+    });
+
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.once(signal, () => {
+      void flushStorage().finally(() => process.exit(0));
+    });
+  }
 }

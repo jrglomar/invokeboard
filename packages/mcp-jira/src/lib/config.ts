@@ -119,9 +119,12 @@ const configSchema = z.object({
   ADMIN_EMAILS: z.string().default(""),
   // v1.65 (ADR-077): pluggable storage — "json" (dev default, byte-identical per-file stores)
   // or "sqlite" (production, one better-sqlite3 database file). See src/lib/storage/.
-  STORAGE_DRIVER: z.enum(["json", "sqlite"]).default("json"),
+  // v1.74 (ADR-085): or "mysql" — the same docs table in MySQL (write-behind cache, mysqlDriver.ts).
+  STORAGE_DRIVER: z.enum(["json", "sqlite", "mysql"]).default("json"),
   // Resolved relative to the package dir (same base as the other store defaults) unless absolute.
   STORAGE_SQLITE_FILE: z.string().default(".invokeboard-stores.sqlite"),
+  // v1.74: mysql://user:pass@host:3306/db — required iff STORAGE_DRIVER=mysql (checked in getConfig).
+  STORAGE_MYSQL_URL: z.string().default(""),
   // v1.22: dev-status applicationType for linked-PR reads (GitHub | GitHubEnterprise | bitbucket).
   JIRA_DEV_STATUS_APP_TYPE: z.string().default("GitHub"),
   MCP_JIRA_HTTP_PORT: z.coerce.number().default(4001),
@@ -166,6 +169,12 @@ export function getConfig(): Config {
         ? missing
         : result.error.issues.map((i) => i.path.join("."));
     throw new ConfigError(fields);
+  }
+
+  // v1.74 (ADR-085): the mysql driver has no usable default connection — fail fast, like a missing
+  // required var, rather than at the first store access.
+  if (result.data.STORAGE_DRIVER === "mysql" && result.data.STORAGE_MYSQL_URL.trim() === "") {
+    throw new ConfigError(["STORAGE_MYSQL_URL"]);
   }
 
   cachedConfig = result.data;

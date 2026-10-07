@@ -140,6 +140,9 @@ so tests run with no `.env`.
 | `JIRA_OFFSET_FILE` | mcp-jira | optional | `<mcp-jira pkg>/.invokeboard-offset.json` — JSON store for the offset ledger (v1.26) |
 | `JIRA_TEAM_FILE` | mcp-jira | optional | `<mcp-jira pkg>/.invokeboard-team.json` — JSON store for the per-board team roster (v1.8) |
 | `JIRA_DRAFT_PLAN_FILE` | mcp-jira | optional | `<mcp-jira pkg>/.invokeboard-draft-plan.json` — JSON store for per-PO-sprint draft capacity plans (v1.68) |
+| `STORAGE_DRIVER` | mcp-jira | optional | `"json"` — `"json"` (per-file stores, dev) \| `"sqlite"` (one better-sqlite3 file, v1.65) \| `"mysql"` (MySQL `docs` table, v1.74 — ADR-085) |
+| `STORAGE_SQLITE_FILE` | mcp-jira | optional | `.invokeboard-stores.sqlite` (relative to the mcp-jira pkg unless absolute) — used only when `STORAGE_DRIVER=sqlite` |
+| `STORAGE_MYSQL_URL` | mcp-jira | required iff `STORAGE_DRIVER=mysql` | `""` — `mysql://user:pass@host:3306/db` (v1.74). Startup fails with a `CONFIG` error when the driver is mysql and this is empty. |
 | `GITHUB_TOKEN` | mcp-github | yes (no default) | — |
 | `GITHUB_REPO` | mcp-github | optional (used as default repo) | — |
 | `MCP_JIRA_HTTP_PORT` | mcp-jira | optional | `4001` |
@@ -3597,3 +3600,41 @@ No tool names, routes, ports, or error codes change. The rename touches identity
     NewPoFromDevMode 8, aiDraftPoStory 1); mcp-github 57 unchanged — total 1,826 → **1,884**;
     smoke 61 → **62** (`draft-po-story` 503 parity; expected jira tools 45 → 47). react-app version
     pill 1.71.0 → **1.72.0**.
+
+## Changelog v1.74 (2026-10-07 — MySQL storage driver + portable data export/import + production compose; ADR-085)
+
+219. **§3 — third storage driver `mysql`.** `STORAGE_DRIVER` = `"json"` | `"sqlite"` | **`"mysql"`**;
+    new env `STORAGE_MYSQL_URL` (`mysql://user:pass@host:3306/db`, required iff mysql). Same one-table
+    shape as sqlite — `docs(scope VARCHAR(191), name VARCHAR(191), data LONGTEXT CHECK JSON_VALID, updated_at DATETIME(3),
+    PRIMARY KEY(scope, name))`, InnoDB/utf8mb4_bin, created on first boot (text, not a native JSON
+    column, so object key order round-trips exactly as on sqlite). The storage port stays
+    **synchronous**: the mysql driver preloads every row into an in-memory cache at startup, serves
+    `readDoc` from it, and persists `writeDoc` **write-behind** through one serialized queue
+    (latest-write-wins per (scope, name); failed upserts retried with backoff and logged, never thrown
+    into the request). No store/tool/route changed.
+220. **Startup / shutdown.** Both entries (`http.ts`, stdio `index.ts`) `await initStorage()` before
+    serving (a no-op for json/sqlite; for mysql: connect + create table + preload — a failure exits
+    with a clear error). SIGTERM/SIGINT `await flushStorage()` before exit so queued writes land.
+    **Durability caveat:** a hard kill (SIGKILL/power loss) can drop writes still in the queue
+    (typically milliseconds old). The one-replica rule (DEPLOYMENT.md §5.8) is unchanged and is now
+    load-bearing — a second replica would serve a stale cache.
+221. **Portable doc bundle** (`storage/bundle.ts`): `{ format: "invokeboard-docs/1", exportedAt, source,
+    count, docs: [{ scope, name, updated_at, data }] }`, docs sorted by (scope, name). Produced by
+    `packages/mcp-jira/scripts/storage-export.ts` (reads the configured sqlite/json source; sqlite also
+    gets a WAL-safe `backup()` copy) and the host wrapper `scripts/export-data.mjs` (runs it inside the
+    live container → `./backups/<ts>/`, plus a raw `/data` tar, and verifies the doc count). Consumed by
+    `packages/mcp-jira/scripts/storage-import.ts <bundle>` — loads into the configured driver, **refuses
+    a non-empty target unless `--force`**, then re-reads and deep-compares every doc (`verified N/N`).
+    Bundles contain sealed tokens — git/docker-ignored (`backups/`, `import/`).
+222. **Production compose** `docker-compose.prod.yml`: adds `mysql:8.4` (named volume
+    `invokeboard-mysql`, healthcheck, no host port); `jira` runs `STORAGE_DRIVER=mysql` and waits for a
+    healthy mysql; neither bridge publishes a host port; `web` binds `127.0.0.1:8080`; `cloudflared`
+    kept; log rotation on every service. `.env.prod.example`, `scripts/backup-mysql.sh` /
+    `restore-mysql.sh`, and the DEPLOYMENT.md §9 server runbook ship alongside. The local
+    `docker-compose.yml` is unchanged (still sqlite).
+223. **Tests**: mcp-jira 719 → **744** (+25: the json/sqlite contract suite now also runs against the
+    mysql driver over an in-memory fake pool (+6); mysql lifecycle/write-behind/retry/flush-timeout/
+    key-order/restart/redaction + doc-bundle format and sqlite → bundle → mysql round trip (+16,
+    `storageMysql.test.ts`); `STORAGE_DRIVER=mysql` config validation (+3)); react-app 1161 and
+    mcp-github 57 unchanged. Rehearsed against a real `mysql:8.4`: the live 19-doc export imported and
+    verified 19/19, a bridge write survived a SIGTERM restart, and backup → delete → restore round-tripped.

@@ -11,6 +11,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { tools } from "./tools/index.js";
 import { getConfig } from "./lib/config.js";
+import { initStorage, flushStorage } from "./lib/storage/index.js";
 import {
   draftTicketsPrompt,
   enhanceTicketPrompt,
@@ -129,6 +130,20 @@ server.registerPrompt(
     ],
   })
 );
+
+// v1.74 (ADR-085): mysql storage must connect + preload before the first tool call (no-op otherwise).
+try {
+  await initStorage();
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  process.stderr.write(`[mcp-jira] Storage init failed at startup: ${msg}\n`);
+  process.exit(1);
+}
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.once(signal, () => {
+    void flushStorage().finally(() => process.exit(0));
+  });
+}
 
 // Connect and start listening
 await server.connect(new StdioServerTransport());
